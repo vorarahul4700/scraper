@@ -1,63 +1,104 @@
-name: Parallel Scraper
+name: Parallel Sitemap Scraper
 
 on:
   workflow_dispatch:
+    inputs:
+      total_sitemaps:
+        description: "Total sitemaps to scrape (0 = all)"
+        required: false
+        default: "0"
+      sitemaps_per_job:
+        description: "Sitemaps per parallel job"
+        required: true
+        default: "2"
+      urls_per_sitemap:
+        description: "Product URLs per sitemap (0 = all)"
+        required: false
+        default: "200"
+
   schedule:
     - cron: "0 3 * * *"
 
 jobs:
-  run:
-    runs-on: ubuntu-latest  # Or ubuntu-22.04-large
-    timeout-minutes: 240
-    
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+
+    steps:
+      - name: Generate matrix
+        id: matrix
+        run: |
+          TOTAL=${{ github.event.inputs.total_sitemaps || 0 }}
+          PER_JOB=${{ github.event.inputs.sitemaps_per_job || 2 }}
+
+          if [ "$TOTAL" -eq 0 ]; then
+            TOTAL=20
+          fi
+
+          JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))
+
+          MATRIX="["
+          for ((i=0;i<JOBS;i++)); do
+            OFFSET=$(( i * PER_JOB ))
+            MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB},"
+          done
+          MATRIX="${MATRIX%,}]"
+
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+  scrape:
+    needs: plan
+    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        php-version: ["8.2"]
-    
+        include: ${{ fromJson(needs.plan.outputs.matrix) }}
+
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Setup PHP with parallel extensions
+
+      - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: ${{ matrix.php-version }}
-          extensions: ftp, simplexml, pcntl, posix, curl, sockets
-          ini-values: |
-            memory_limit=4096M
-            max_execution_time=0
-            max_input_time=-1
-            default_socket_timeout=600
-            curl.cainfo=/etc/ssl/certs/ca-certificates.crt
-          tools: composer
-            
-      - name: Install dependencies
-        run: |
-          composer require amphp/amp
-          composer require amphp/parallel
-          composer require amphp/process
-          composer require league/csv
-          
-      - name: Run parallel scraper
+          php-version: "8.1"
+          extensions: ftp, simplexml
+          ini-values: memory_limit=1024M, max_execution_time=0
+
+      - name: Run scraper
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}
           FTP_BASE_DIR: ${{ secrets.FTP_OUTPUT_PATH }}
           CURR_URL: ${{ secrets.CURR_URL }}
-          MAX_WORKERS: 16
-          BATCH_SIZE: 1000
+          SITEMAP_OFFSET: ${{ matrix.offset }}
+          MAX_SITEMAPS: ${{ matrix.limit }}
+          MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap || 200 }}
         run: php scraper.php
-        
-      - name: Upload CSV artifact
+
+      - name: Upload chunk
+        uses: actions/upload-artifact@v4
+        with:
+          name: products_chunk_${{ matrix.offset }}
+          path: products_chunk.csv
+
+  merge:
+    needs: scrape
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: chunks
+
+      - name: Merge CSV files
+        run: |
+          head -n 1 chunks/*/products_chunk.csv > products_full.csv
+          tail -n +2 chunks/*/products_chunk.csv >> products_full.csv
+
+      - name: Upload final CSV
         uses: actions/upload-artifact@v4
         with:
           name: products_full
           path: products_full.csv
-          if-no-files-found: error
-          
-      - name: Upload Logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: scraper-logs
-          path: scraper_*.log
