@@ -72,7 +72,7 @@ function processProduct(string $url, $csv, array &$seen): void
     }
 
     $options = $product['options'] ?? [];
-    $images  = implode(',', array_map('normalizeImage', $product['images'] ?? []));
+    $images  = $product['images'] ?? '';
 
     logMsg("Variants found: " . count($product['variants']));
 
@@ -86,6 +86,7 @@ function processProduct(string $url, $csv, array &$seen): void
             $v['id'],
             trim($v['title']),
             $v['sku'] ?? '',
+            $v['barcode'] ?? '',
             $options[0]['name'] ?? '',
             $v['option1'] ?? '',
             $options[1]['name'] ?? '',
@@ -132,7 +133,7 @@ $csv = fopen(OUTPUT_CSV, 'w');
 /* ---- CLEAN CSV HEADER ---- */
 fputcsv($csv, [
     'product_id','product_title','vendor','type','handle',
-    'variant_id','variant_title','sku',
+    'variant_id','variant_title','sku','barcode',
     'option_1_name','option_1_value',
     'option_2_name','option_2_value',
     'option_3_name','option_3_value',
