@@ -190,7 +190,6 @@ jobs:
           echo "Output file: ${SITE}_products_${TIMESTAMP}.csv"
 
       - name: Upload to FTP (Optional)
-        if: ${{ secrets.FTP_HOST != '' && secrets.FTP_USER != '' && secrets.FTP_PASS != '' }}
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USER }}
