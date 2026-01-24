@@ -38,35 +38,6 @@ jobs:
         echo "Chrome version:"
         google-chrome --version
         
-    - name: Create product URLs file
-      run: |
-        mkdir -p gshopping
-        cd gshopping
-        
-        # Create product_urls.json if it doesn't exist
-        if [ ! -f "product_urls.json" ]; then
-          cat > product_urls.json << 'EOF'
-          [
-            {
-              "product_id": 1,
-              "url": "https://www.google.com/search?q=office+chair&tbm=shop&gl=US&hl=en",
-              "keyword": "office chair"
-            },
-            {
-              "product_id": 2,
-              "url": "https://www.google.com/search?q=wireless+headphones&tbm=shop&gl=US&hl=en",
-              "keyword": "wireless headphones"
-            },
-            {
-              "product_id": 3,
-              "url": "https://www.google.com/search?q=laptop&tbm=shop&gl=US&hl=en",
-              "keyword": "laptop"
-            }
-          ]
-          EOF
-          echo "Created sample product_urls.json"
-        fi
-        
     - name: Install Python dependencies
       run: |
         cd gshopping
