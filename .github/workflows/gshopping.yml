@@ -2,19 +2,19 @@ name: Google Shopping Scraper
 
 on:
   schedule:
-    # Run every 6 hours
-    - cron: '0 */6 * * *'
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
   workflow_dispatch:  # Allow manual triggering
   push:
     branches: [ main, master ]
     paths:
       - 'gshopping/**'
-      - '.github/workflows/shopping-scraper.yml'
+      - '.github/workflows/google-shopping-scraper.yml'
 
 jobs:
   scrape:
-    runs-on: ubuntu-22.04  # Use Ubuntu 22.04 instead of latest
-    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     
     steps:
     - name: Checkout repository
@@ -26,54 +26,21 @@ jobs:
         python-version: '3.10'
         cache: 'pip'
         
-    - name: Install Chrome and dependencies
+    - name: Install Chrome (Simple Method)
       run: |
-        # Install Chrome from official Google repository
+        # Download and install Chrome from official source
+        wget -q -O chrome.deb "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
         sudo apt-get update
-        sudo apt-get install -y \
-          wget \
-          curl \
-          unzip \
-          jq
-        
-        # Download and install Chrome
-        wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-        sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
-        
-        # Install minimal dependencies
-        sudo apt-get install -y \
-          libnss3 \
-          libxss1 \
-          libatk-bridge2.0-0 \
-          libgtk-3-0 \
-          libgbm1 \
-          libx11-xcb1 \
-          libxcomposite1 \
-          libxdamage1 \
-          libxrandr2 \
-          libasound2t64 \
-          libpangocairo-1.0-0
+        sudo dpkg -i chrome.deb || sudo apt-get install -f -y
+        sudo apt-get install -y wget
         
         # Verify Chrome installation
         echo "Chrome version:"
         google-chrome --version
         
-    - name: Install ChromeDriver using webdriver-manager
+    - name: Create product URLs file
       run: |
-        # Install Python packages first
-        pip install webdriver-manager==4.0.1
-        
-        # Test webdriver-manager
-        python -c "from webdriver_manager.chrome import ChromeDriverManager; print('WebDriver Manager imported successfully')"
-        
-    - name: Install Python dependencies
-      run: |
-        cd gshopping
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        
-    - name: Create configuration files
-      run: |
+        mkdir -p gshopping
         cd gshopping
         
         # Create product_urls.json if it doesn't exist
@@ -83,69 +50,109 @@ jobs:
             {
               "product_id": 1,
               "url": "https://www.google.com/search?q=office+chair&tbm=shop&gl=US&hl=en",
-              "keyword": "office chair",
-              "test": true
+              "keyword": "office chair"
             },
             {
               "product_id": 2,
               "url": "https://www.google.com/search?q=wireless+headphones&tbm=shop&gl=US&hl=en",
-              "keyword": "wireless headphones",
-              "test": true
+              "keyword": "wireless headphones"
+            },
+            {
+              "product_id": 3,
+              "url": "https://www.google.com/search?q=laptop&tbm=shop&gl=US&hl=en",
+              "keyword": "laptop"
             }
           ]
           EOF
           echo "Created sample product_urls.json"
         fi
         
-        # Create requirements.txt if it doesn't exist
-        if [ ! -f "requirements.txt" ]; then
-          cat > requirements.txt << 'EOF'
-          # Core dependencies
-          selenium==4.15.0
-          webdriver-manager==4.0.1
-          beautifulsoup4==4.12.2
-          requests==2.31.0
-          lxml==4.9.3
-          
-          # Data processing
-          pandas==2.0.3
-          numpy==1.24.3
-          
-          # Utilities
-          fake-useragent==1.4.0
-          python-dateutil==2.8.2
-          python-dotenv==1.0.0
-          
-          # Output
-          openpyxl==3.1.2
-          xlsxwriter==3.1.9
-          EOF
-          echo "Created requirements.txt"
+    - name: Install Python dependencies
+      run: |
+        cd gshopping
+        python -m pip install --upgrade pip
+        
+        # Install core dependencies
+        pip install selenium==4.15.0
+        pip install undetected-chromedriver==3.5.4
+        pip install beautifulsoup4==4.12.2
+        
+        # Install optional dependencies (if needed by your code)
+        pip install requests==2.31.0
+        pip install pandas==2.0.3
+        pip install fake-useragent==1.4.0
+        
+    - name: Copy scraper files
+      run: |
+        # Copy your scraper code to gshopping directory
+        # If your code is already in gshopping/, this will preserve it
+        if [ -f "gscrapperci.py" ]; then
+          cp gscrapperci.py gshopping/
+          echo "Copied gscrapperci.py to gshopping/"
         fi
+        
+        # If you have a separate file for GitHub Actions
+        if [ -f "gshopping/gscrapperci.py" ]; then
+          echo "Scraper file already exists in gshopping/"
+        fi
+        
+    - name: Create requirements.txt
+      run: |
+        cd gshopping
+        # Create requirements.txt file
+        cat > requirements.txt << 'EOF'
+        selenium==4.15.0
+        undetected-chromedriver==3.5.4
+        beautifulsoup4==4.12.2
+        requests==2.31.0
+        pandas==2.0.3
+        fake-useragent==1.4.0
+        EOF
         
     - name: Run Google Shopping Scraper
       run: |
         cd gshopping
-        echo "Starting scraper..."
-        python gscrapperci.py
+        echo "Starting Google Shopping Scraper..."
         
-    - name: Display results
+        # Set environment variables
+        export DISPLAY=:99
+        export PATH=$PATH:/usr/local/bin
+        
+        # Run the scraper with timeout
+        timeout 1800 python gscrapperci.py  # 30 minute timeout
+        
+    - name: Check results
       run: |
         cd gshopping
-        echo "=== Scraping Results ==="
+        echo "=== Checking Results ==="
         
         if [ -d "scraping_results" ]; then
-          echo "Directory contents:"
+          echo "✅ Scraping results directory exists"
+          echo "Files found:"
           ls -la scraping_results/
           
+          # Count CSV files
+          CSV_COUNT=$(find scraping_results -name "*.csv" | wc -l)
+          JSON_COUNT=$(find scraping_results -name "*.json" | wc -l)
+          
+          echo ""
+          echo "📊 Statistics:"
+          echo "- CSV files: $CSV_COUNT"
+          echo "- JSON files: $JSON_COUNT"
+          
           # Show summary if exists
-          if [ -f "scraping_results/summary.json" ]; then
-            echo -e "\n=== Summary ==="
-            echo "Total products: $(jq '.metadata.total_products // 0' scraping_results/summary.json 2>/dev/null || echo '0')"
-            echo "Successful: $(jq '.products | map(select(.status | test("found|success|container|completed"))) | length' scraping_results/summary.json 2>/dev/null || echo '0')"
+          if [ -f "scraping_results/scraping_summary.json" ]; then
+            echo ""
+            echo "📋 Summary:"
+            PRODUCTS_COUNT=$(jq '.products | length' scraping_results/scraping_summary.json 2>/dev/null || echo "0")
+            COMPETITORS_COUNT=$(jq '.competitors | length' scraping_results/scraping_summary.json 2>/dev/null || echo "0")
+            echo "- Products scraped: $PRODUCTS_COUNT"
+            echo "- Competitors found: $COMPETITORS_COUNT"
           fi
         else
-          echo "No results directory found"
+          echo "❌ No scraping results directory found"
+          mkdir -p scraping_results
+          echo '{"error": "No results generated", "timestamp": "'$(date -Iseconds)'"}' > scraping_results/error.json
         fi
         
     - name: Upload results as artifact
@@ -161,40 +168,67 @@ jobs:
     - name: Create workflow summary
       if: always()
       run: |
-        echo "## Google Shopping Scraper Results" >> $GITHUB_STEP_SUMMARY
+        echo "## 🛒 Google Shopping Scraper Results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Run ID:** ${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Time:** $(date -u)" >> $GITHUB_STEP_SUMMARY
+        echo "**Run ID:** \`${{ github.run_id }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Trigger:** \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Time:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
         cd gshopping
         
         if [ -d "scraping_results" ]; then
-          echo "### ✅ Results Generated" >> $GITHUB_STEP_SUMMARY
+          echo "### ✅ Results Generated Successfully" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          # Count files
-          CSV_COUNT=$(find scraping_results -name "*.csv" -type f | wc -l)
-          JSON_COUNT=$(find scraping_results -name "*.json" -type f | wc -l)
+          # List all generated files
+          echo "**Generated Files:**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          find scraping_results -type f -name "*.csv" -o -name "*.json" | sort >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           
-          echo "- CSV Files: $CSV_COUNT" >> $GITHUB_STEP_SUMMARY
-          echo "- JSON Files: $JSON_COUNT" >> $GITHUB_STEP_SUMMARY
-          
-          # Show sample if available
-          if [ -f "scraping_results/all_products.csv" ]; then
+          # Show statistics
+          if [ -f "scraping_results/scraping_summary.json" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### Sample Data" >> $GITHUB_STEP_SUMMARY
+            echo "**Statistics:**" >> $GITHUB_STEP_SUMMARY
+            
+            PRODUCTS=$(jq '.products | length' scraping_results/scraping_summary.json 2>/dev/null || echo "0")
+            COMPETITORS=$(jq '.competitors | length' scraping_results/scraping_summary.json 2>/dev/null || echo "0")
+            
+            echo "- Products processed: $PRODUCTS" >> $GITHUB_STEP_SUMMARY
+            echo "- Competitors found: $COMPETITORS" >> $GITHUB_STEP_SUMMARY
+            
+            # Count successful scrapes
+            SUCCESSFUL=$(jq '[.products[] | select(.status | contains("found") or contains("completed") or contains("clicked"))] | length' scraping_results/scraping_summary.json 2>/dev/null || echo "0")
+            echo "- Successful scrapes: $SUCCESSFUL" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Show sample data
+          if [ -f "scraping_results/all_products_summary.csv" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Sample Data (first 3 rows):**" >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`csv" >> $GITHUB_STEP_SUMMARY
-            head -3 scraping_results/all_products.csv | head -5 >> $GITHUB_STEP_SUMMARY
+            head -4 scraping_results/all_products_summary.csv >> $GITHUB_STEP_SUMMARY
             echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           fi
+          
         else
-          echo "### ❌ No Results Generated" >> $GITHUB_STEP_SUMMARY
+          echo "### ❌ Scraping Failed" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Check the logs for errors." >> $GITHUB_STEP_SUMMARY
+          echo "No results were generated. Check the workflow logs for errors." >> $GITHUB_STEP_SUMMARY
         fi
         
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "---" >> $GITHUB_STEP_SUMMARY
-        echo "*Results available as artifacts*" >> $GITHUB_STEP_SUMMARY
+        echo "📦 **Results are available as artifacts for 30 days.**" >> $GITHUB_STEP_SUMMARY
+        echo "🔄 **Next scheduled run:** Daily at 2 AM UTC" >> $GITHUB_STEP_SUMMARY
+        
+    - name: Upload logs for debugging
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: scraper-logs
+        path: |
+          gshopping/scraper.log
+          /tmp/chromedriver.log
+        retention-days: 7
