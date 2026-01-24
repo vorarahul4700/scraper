@@ -1,8 +1,19 @@
+# Core scraping
 selenium==4.15.0
-undetected-chromedriver==3.5.4
+webdriver-manager==4.0.1
 beautifulsoup4==4.12.2
 requests==2.31.0
 lxml==4.9.3
+
+# Data processing
 pandas==2.0.3
+numpy==1.24.3
+
+# Utilities
 fake-useragent==1.4.0
 python-dateutil==2.8.2
+python-dotenv==1.0.0
+
+# Output
+openpyxl==3.1.2
+xlsxwriter==3.1.9

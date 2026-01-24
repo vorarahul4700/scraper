@@ -1,253 +1,278 @@
 #!/usr/bin/env python3
 """
-Google Shopping Scraper - GitHub Actions Version
-Fixed for Chrome compatibility issues
+Google Shopping Scraper for GitHub Actions
+Fixed for Chrome 120 compatibility
 """
 
-import sys
 import json
 import random
-from datetime import datetime
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.action_chains import ActionChains
 import time
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
 import os
 import csv
 import traceback
+import logging
+from datetime import datetime
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
+from webdriver_manager.chrome import ChromeDriverManager
+import requests
+from bs4 import BeautifulSoup
 
-# Disable unnecessary logging
-os.environ['WDM_LOG_LEVEL'] = '0'
+# Configuration
+OUTPUT_DIR = "scraping_results"
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+]
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('scraper.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 def setup_driver():
-    """Setup Chrome driver for GitHub Actions - FIXED VERSION"""
-    chrome_options = Options()
-    
-    # Headless mode for GitHub Actions
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-notifications")
-    chrome_options.add_argument("--disable-popup-blocking")
-    chrome_options.add_argument("--log-level=3")
-    chrome_options.add_argument("--silent")
-    
-    # User agents
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    ]
-    chrome_options.add_argument(f"user-agent={random.choice(user_agents)}")
-    
-    # DON'T use excludeSwitches with undetected_chromedriver
-    # Just use plain Selenium Chrome driver for GitHub Actions
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    
+    """Setup Chrome driver for GitHub Actions"""
     try:
-        # Use Chrome directly with webdriver-manager
-        from webdriver_manager.chrome import ChromeDriverManager
-        from selenium.webdriver.chrome.service import Service
+        chrome_options = Options()
         
+        # Headless mode for CI
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-notifications")
+        chrome_options.add_argument("--disable-popup-blocking")
+        chrome_options.add_argument("--log-level=3")
+        
+        # Add user agent
+        chrome_options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
+        
+        # Disable automation detection
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+        
+        logger.info("Setting up Chrome driver...")
+        
+        # Use webdriver-manager for automatic ChromeDriver management
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
         
-        # Remove webdriver property
+        # Execute CDP commands to prevent detection
+        driver.execute_cdp_cmd('Network.setUserAgentOverride', {
+            "userAgent": random.choice(USER_AGENTS)
+        })
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         
-        print("Chrome driver setup successful")
+        logger.info("Chrome driver setup successful")
         return driver
         
     except Exception as e:
-        print(f"Error setting up Chrome with webdriver-manager: {e}")
-        
-        # Fallback: Try system Chrome
-        try:
-            driver = webdriver.Chrome(options=chrome_options)
-            print("Fallback Chrome driver setup successful")
-            return driver
-        except Exception as e2:
-            print(f"Fallback also failed: {e2}")
-            raise
+        logger.error(f"Failed to setup Chrome driver: {str(e)}")
+        raise
 
-def save_to_csv(data, filename, headers=None):
-    """Save data to CSV with all fields"""
+def save_to_csv(data, filename):
+    """Save data to CSV file"""
     if not data:
-        print(f"No data to save to {filename}")
-        return
+        logger.warning(f"No data to save to {filename}")
+        return False
     
-    # Create directory if it doesn't exist
-    os.makedirs('scraping_results', exist_ok=True)
-    filepath = os.path.join('scraping_results', filename)
-    
-    # Get all unique keys
-    all_keys = set()
-    for item in data:
-        if isinstance(item, dict):
-            all_keys.update(item.keys())
-    
-    if not all_keys:
-        return
-    
-    headers = list(all_keys)
+    # Ensure output directory exists
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    filepath = os.path.join(OUTPUT_DIR, filename)
     
     try:
+        # Get all unique keys from all dictionaries
+        all_keys = set()
+        for item in data:
+            if isinstance(item, dict):
+                all_keys.update(item.keys())
+        
+        if not all_keys:
+            return False
+        
+        headers = list(all_keys)
+        
         with open(filepath, 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=headers)
             writer.writeheader()
             
             for row in data:
                 # Ensure all keys are present
+                row_data = row.copy()
                 for header in headers:
-                    if header not in row:
-                        row[header] = ''
-                writer.writerow(row)
+                    if header not in row_data:
+                        row_data[header] = ''
+                writer.writerow(row_data)
         
-        print(f"✓ Saved {len(data)} rows to {filepath}")
+        logger.info(f"Saved {len(data)} rows to {filename}")
         return True
         
     except Exception as e:
-        print(f"✗ Error saving {filename}: {str(e)}")
+        logger.error(f"Error saving {filename}: {str(e)}")
         return False
 
 def load_product_urls():
-    """Load product URLs from file or environment variable"""
+    """Load product URLs from file"""
     try:
-        # Try to load from file
         with open('product_urls.json', 'r') as f:
-            return json.load(f)
+            data = json.load(f)
+            logger.info(f"Loaded {len(data)} products from product_urls.json")
+            return data
     except FileNotFoundError:
-        # Try to load from environment variable
-        urls_json = os.environ.get('PRODUCT_URLS_JSON')
-        if urls_json:
-            return json.loads(urlls_json)
-        else:
-            print("No product URLs found.")
-            print("Please create product_urls.json or set PRODUCT_URLS_JSON environment variable.")
-            return []
+        logger.warning("product_urls.json not found, using sample data")
+        return [
+            {
+                "product_id": 1,
+                "url": "https://www.google.com/search?q=test+product&tbm=shop",
+                "keyword": "test product",
+                "test": True
+            }
+        ]
+    except Exception as e:
+        logger.error(f"Error loading product URLs: {str(e)}")
+        return []
 
-def scrape_product(driver, product_info, all_results):
-    """Scrape a single product"""
-    product_id = product_info.get('product_id')
-    url = product_info.get('url')
-    keyword = product_info.get('keyword')
-    
-    print(f"\n{'='*60}")
-    print(f"Scraping product {product_id}: {keyword}")
-    print(f"URL: {url[:80]}...")
-    
-    product_data = {
+def scrape_product_page(driver, url, product_id, keyword):
+    """Scrape a single product page"""
+    result = {
         'product_id': product_id,
         'keyword': keyword,
         'url': url,
         'scraped_at': datetime.now().isoformat(),
-        'status': 'attempted'
+        'status': 'started'
     }
     
     try:
-        # Navigate to URL
+        logger.info(f"Navigating to: {url}")
         driver.get(url)
-        time.sleep(random.uniform(5, 8))
         
-        # Check for recaptcha
-        try:
-            if "recaptcha" in driver.page_source.lower() or "captcha" in driver.page_source.lower():
-                product_data['status'] = 'recaptcha_detected'
-                print("⚠️  reCAPTCHA detected")
-                all_results['products'].append(product_data)
-                return
-        except:
-            pass
-        
-        # Get page title
-        product_data['page_title'] = driver.title[:200]
-        
-        # Try to find shopping results container
-        try:
-            # Look for shopping container
-            shopping_containers = driver.find_elements(By.CSS_SELECTOR, "div[data-initq], div.sh-dgr__content, div[jscontroller]")
-            
-            if shopping_containers:
-                product_data['status'] = 'shopping_container_found'
-                product_data['container_count'] = len(shopping_containers)
-                print(f"✓ Found {len(shopping_containers)} shopping containers")
-                
-                # Try to find product items
-                try:
-                    product_items = driver.find_elements(By.CSS_SELECTOR, "div.sh-dlr__list-result, div[data-cid], div.MtXiu")
-                    product_data['product_items_found'] = len(product_items)
-                    print(f"✓ Found {len(product_items)} product items")
-                    
-                    if product_items:
-                        # Try to get first product name
-                        try:
-                            first_product = product_items[0]
-                            product_name = first_product.text[:200]
-                            product_data['sample_product'] = product_name
-                        except:
-                            pass
-                except Exception as e:
-                    product_data['product_items_error'] = str(e)[:100]
-                    
-            else:
-                product_data['status'] = 'no_shopping_container'
-                print("✗ No shopping container found")
-                
-        except Exception as e:
-            product_data['status'] = f'container_error: {str(e)[:100]}'
-            print(f"✗ Error finding container: {str(e)[:100]}")
+        # Wait for page to load
+        time.sleep(random.uniform(3, 5))
         
         # Check if page loaded successfully
-        product_data['page_load_success'] = True
-        if "did not match any documents" in driver.page_source or "no results" in driver.page_source.lower():
-            product_data['status'] = 'no_results'
-            print("⚠️  No results found for this query")
+        if "did not match any documents" in driver.page_source:
+            result['status'] = 'no_results'
+            result['error'] = 'No search results found'
+            return result
+        
+        if "captcha" in driver.page_source.lower() or "recaptcha" in driver.page_source.lower():
+            result['status'] = 'captcha_detected'
+            result['error'] = 'CAPTCHA detected'
+            return result
+        
+        # Get page information
+        result['page_title'] = driver.title
+        result['page_url'] = driver.current_url
+        
+        # Look for shopping results
+        try:
+            # Try multiple selectors for shopping results
+            selectors = [
+                "div.sh-dgr__content",
+                "div[data-initq]",
+                "div[jscontroller]",
+                "div.sh-dlr__list-result"
+            ]
             
+            shopping_elements = []
+            for selector in selectors:
+                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                if elements:
+                    shopping_elements = elements
+                    result['selector_used'] = selector
+                    break
+            
+            if shopping_elements:
+                result['shopping_elements_count'] = len(shopping_elements)
+                result['status'] = 'shopping_results_found'
+                
+                # Extract some sample data from first few elements
+                sample_data = []
+                for i, element in enumerate(shopping_elements[:3]):
+                    try:
+                        text = element.text[:200] if element.text else ""
+                        sample_data.append(f"Element {i+1}: {text}")
+                    except:
+                        pass
+                
+                if sample_data:
+                    result['sample_data'] = " | ".join(sample_data)
+                    
+            else:
+                result['status'] = 'no_shopping_elements'
+                result['error'] = 'Could not find shopping results container'
+                
+        except Exception as e:
+            result['status'] = 'element_search_error'
+            result['error'] = str(e)[:100]
+            
+        # Try to find product names
+        try:
+            product_names = driver.find_elements(By.CSS_SELECTOR, "h3, div[aria-label], a[href*='/shopping/']")
+            if product_names:
+                result['product_names_count'] = len(product_names)
+                
+                # Get first product name if available
+                for name_element in product_names[:5]:
+                    try:
+                        name = name_element.text.strip()
+                        if name and len(name) > 10:
+                            result['first_product_name'] = name[:100]
+                            break
+                    except:
+                        continue
+                        
+        except Exception as e:
+            pass  # This is optional, so don't fail if it errors
+        
+        result['status'] = 'completed'
+        
+    except TimeoutException:
+        result['status'] = 'timeout'
+        result['error'] = 'Page load timeout'
+    except WebDriverException as e:
+        result['status'] = 'webdriver_error'
+        result['error'] = str(e)[:100]
     except Exception as e:
-        product_data['status'] = f'scraping_error: {str(e)[:100]}'
-        product_data['page_load_success'] = False
-        print(f"✗ Scraping error: {str(e)[:100]}")
+        result['status'] = 'unexpected_error'
+        result['error'] = str(e)[:100]
+        logger.error(f"Error scraping product {product_id}: {traceback.format_exc()}")
     
-    all_results['products'].append(product_data)
+    return result
 
 def main():
-    """Main scraping function optimized for GitHub Actions"""
-    print("Starting Google Shopping Scraper on GitHub Actions")
-    print("=" * 60)
+    """Main scraping function"""
+    logger.info("=" * 60)
+    logger.info("Starting Google Shopping Scraper")
+    logger.info("=" * 60)
     
-    # Load product URLs
+    # Load products to scrape
     products = load_product_urls()
     if not products:
-        print("No products to scrape. Using sample products...")
-        # Create sample products for testing
-        products = [
-            {
-                "product_id": 1,
-                "url": "https://www.google.com/search?q=office+chair&tbm=shop",
-                "keyword": "office chair"
-            },
-            {
-                "product_id": 2,
-                "url": "https://www.google.com/search?q=wireless+headphones&tbm=shop",
-                "keyword": "wireless headphones"
-            }
-        ]
+        logger.error("No products to scrape. Exiting.")
+        return
     
-    print(f"Loaded {len(products)} products to scrape")
+    logger.info(f"Found {len(products)} products to scrape")
     
-    # Initialize results
+    # Initialize results storage
     all_results = {
         'products': [],
         'metadata': {
-            'run_at': datetime.now().isoformat(),
+            'start_time': datetime.now().isoformat(),
             'total_products': len(products),
             'environment': 'github-actions'
         }
@@ -255,68 +280,110 @@ def main():
     
     driver = None
     try:
+        # Setup Chrome driver
         driver = setup_driver()
         
+        # Scrape each product
         for i, product in enumerate(products, 1):
-            print(f"\nProcessing product {i}/{len(products)}")
-            scrape_product(driver, product, all_results)
+            product_id = product.get('product_id', i)
+            url = product.get('url', '')
+            keyword = product.get('keyword', f'Product {product_id}')
             
-            # Take a break between requests
+            logger.info(f"[{i}/{len(products)}] Scraping: {keyword}")
+            
+            # Scrape the product
+            result = scrape_product_page(driver, url, product_id, keyword)
+            all_results['products'].append(result)
+            
+            # Log status
+            status = result.get('status', 'unknown')
+            if 'error' in result:
+                logger.warning(f"  Status: {status} - {result.get('error')}")
+            else:
+                logger.info(f"  Status: {status}")
+            
+            # Add delay between requests (except for last one)
             if i < len(products):
-                wait_time = random.uniform(5, 10)
-                print(f"Waiting {wait_time:.1f} seconds before next request...")
-                time.sleep(wait_time)
+                delay = random.uniform(5, 10)
+                logger.info(f"  Waiting {delay:.1f} seconds...")
+                time.sleep(delay)
         
-        print(f"\n{'='*60}")
-        print(f"Scraping completed. Total results: {len(all_results['products'])}")
+        # Update metadata
+        all_results['metadata']['end_time'] = datetime.now().isoformat()
+        all_results['metadata']['duration_seconds'] = (
+            datetime.fromisoformat(all_results['metadata']['end_time']) - 
+            datetime.fromisoformat(all_results['metadata']['start_time'])
+        ).total_seconds()
         
         # Calculate success rate
         successful = len([p for p in all_results['products'] 
-                         if 'container_found' in str(p.get('status')) or 'found' in str(p.get('status'))])
-        print(f"Successful scrapes: {successful}/{len(all_results['products'])}")
+                         if p.get('status') in ['completed', 'shopping_results_found']])
+        all_results['metadata']['successful_scrapes'] = successful
+        all_results['metadata']['success_rate'] = f"{(successful/len(products))*100:.1f}%" if products else "0%"
         
     except Exception as e:
-        print(f"Error in main scraping loop: {e}")
-        traceback.print_exc()
+        logger.error(f"Fatal error in main loop: {str(e)}")
+        logger.error(traceback.format_exc())
         
-        # Save partial results even if error occurs
+        # Save partial results
         if all_results['products']:
             save_to_csv(all_results['products'], 'partial_results.csv')
             
     finally:
+        # Cleanup
         if driver:
             try:
                 driver.quit()
-                print("Chrome driver closed")
+                logger.info("Chrome driver closed")
             except:
                 pass
     
-    # Ensure scraping_results directory exists
-    os.makedirs('scraping_results', exist_ok=True)
+    # Ensure output directory exists
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    # Save final results
+    # Save results
     if all_results['products']:
+        # Save CSV
         save_to_csv(all_results['products'], 'all_products.csv')
+        
+        # Save individual product files
+        for product in all_results['products']:
+            product_id = product.get('product_id')
+            if product_id:
+                save_to_csv([product], f'product_{product_id}.csv')
     
-    # Save summary JSON
+    # Save JSON summary
     try:
-        summary_file = os.path.join('scraping_results', 'summary.json')
+        summary_file = os.path.join(OUTPUT_DIR, 'summary.json')
         with open(summary_file, 'w') as f:
-            # Convert datetime objects to string for JSON serialization
-            def json_serial(obj):
-                if isinstance(obj, datetime):
-                    return obj.isoformat()
-                raise TypeError(f"Type {type(obj)} not serializable")
-            
-            json.dump(all_results, f, indent=2, default=json_serial)
-        print(f"✓ Summary saved to {summary_file}")
+            json.dump(all_results, f, indent=2, default=str)
+        logger.info(f"Summary saved to {summary_file}")
     except Exception as e:
-        print(f"✗ Error saving JSON summary: {str(e)}")
+        logger.error(f"Error saving JSON summary: {str(e)}")
     
-    print(f"\n{'='*60}")
-    print("PROCESS COMPLETED")
-    print(f"{'='*60}")
-    print(f"Results saved to: scraping_results/")
+    # Print final statistics
+    logger.info("=" * 60)
+    logger.info("SCRAPING COMPLETED")
+    logger.info("=" * 60)
+    logger.info(f"Total products: {len(products)}")
+    logger.info(f"Successful: {all_results['metadata'].get('successful_scrapes', 0)}")
+    logger.info(f"Success rate: {all_results['metadata'].get('success_rate', '0%')}")
+    logger.info(f"Duration: {all_results['metadata'].get('duration_seconds', 0):.1f} seconds")
+    logger.info(f"Results saved to: {OUTPUT_DIR}/")
+    
+    # Create a simple success flag file
+    success_file = os.path.join(OUTPUT_DIR, 'SUCCESS')
+    with open(success_file, 'w') as f:
+        f.write(f"Scraping completed at {datetime.now().isoformat()}\n")
+        f.write(f"Products: {len(products)}\n")
+        f.write(f"Successful: {all_results['metadata'].get('successful_scrapes', 0)}\n")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("Scraping interrupted by user")
+    except Exception as e:
+        logger.error(f"Unhandled exception: {str(e)}")
+        logger.error(traceback.format_exc())
+        exit(1)

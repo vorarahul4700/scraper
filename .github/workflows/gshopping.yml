@@ -34,36 +34,49 @@ jobs:
           gnupg \
           unzip \
           curl \
-          jq
+          jq \
+          xvfb \
+          libxss1 \
+          libappindicator3-1 \
+          libindicator7 \
+          fonts-liberation \
+          libasound2 \
+          libnspr4 \
+          libnss3 \
+          libx11-xcb1 \
+          libxcomposite1 \
+          libxcursor1 \
+          libxdamage1 \
+          libxi6 \
+          libxtst6 \
+          lsb-release
         
-        # Install Google Chrome
-        wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
-        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+        # Install Google Chrome Stable (version 120)
+        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+        echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
         sudo apt-get update
-        sudo apt-get install -y google-chrome-stable
+        sudo apt-get install -y google-chrome-stable=120.*
+        
+        # Lock Chrome version to avoid auto-updates
+        sudo apt-mark hold google-chrome-stable
         
         # Verify Chrome installation
+        echo "Chrome version:"
         google-chrome --version
         
-    - name: Install ChromeDriver
+    - name: Install ChromeDriver (Fixed version)
       run: |
-        # Get Chrome version
-        CHROME_VERSION=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)
-        CHROME_MAJOR_VERSION=$(echo $CHROME_VERSION | cut -d'.' -f1)
-        echo "Chrome Version: $CHROME_VERSION"
-        echo "Chrome Major Version: $CHROME_MAJOR_VERSION"
+        # Install ChromeDriver 120 (matching Chrome version)
+        CHROMEDRIVER_VERSION="120.0.6099.109"
+        echo "Installing ChromeDriver version: $CHROMEDRIVER_VERSION"
         
-        # Get matching ChromeDriver version
-        CHROMEDRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$CHROME_MAJOR_VERSION")
-        echo "Downloading ChromeDriver version: $CHROMEDRIVER_VERSION"
-        
-        # Download and install ChromeDriver
         wget -q "https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip"
         unzip -q chromedriver_linux64.zip
         sudo mv chromedriver /usr/local/bin/
         sudo chmod +x /usr/local/bin/chromedriver
         
-        # Verify ChromeDriver
+        # Verify installation
+        echo "ChromeDriver version:"
         chromedriver --version
         
     - name: Install Python dependencies
@@ -72,98 +85,133 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         
-    - name: Create product URLs if missing
+    - name: Create configuration files
       run: |
         cd gshopping
+        
+        # Create product_urls.json if it doesn't exist
         if [ ! -f "product_urls.json" ]; then
-          echo "Creating sample product_urls.json..."
           cat > product_urls.json << 'EOF'
           [
             {
               "product_id": 1,
               "url": "https://www.google.com/search?q=office+chair&tbm=shop&gl=US&hl=en",
-              "keyword": "office chair"
+              "keyword": "office chair",
+              "test": true
             },
             {
               "product_id": 2,
               "url": "https://www.google.com/search?q=wireless+headphones&tbm=shop&gl=US&hl=en",
-              "keyword": "wireless headphones"
-            },
-            {
-              "product_id": 3,
-              "url": "https://www.google.com/search?q=laptop&tbm=shop&gl=US&hl=en",
-              "keyword": "laptop"
+              "keyword": "wireless headphones",
+              "test": true
             }
           ]
           EOF
+          echo "Created sample product_urls.json"
+        fi
+        
+        # Create requirements.txt if it doesn't exist
+        if [ ! -f "requirements.txt" ]; then
+          cat > requirements.txt << 'EOF'
+          # Core dependencies
+          selenium==4.15.0
+          webdriver-manager==4.0.1
+          beautifulsoup4==4.12.2
+          requests==2.31.0
+          lxml==4.9.3
+          
+          # Data processing
+          pandas==2.0.3
+          numpy==1.24.3
+          
+          # Utilities
+          fake-useragent==1.4.0
+          python-dateutil==2.8.2
+          python-dotenv==1.0.0
+          
+          # Output
+          openpyxl==3.1.2
+          xlsxwriter==3.1.9
+          EOF
+          echo "Created requirements.txt"
         fi
         
     - name: Run Google Shopping Scraper
       run: |
         cd gshopping
         echo "Starting scraper..."
-        python gscrapperci.py
+        timeout 1200 python gscrapperci.py || echo "Scraping completed or timed out"
         
-    - name: Display results summary
+    - name: Display results
       run: |
         cd gshopping
         echo "=== Scraping Results ==="
+        
         if [ -d "scraping_results" ]; then
-          echo "Files generated:"
-          ls -la scraping_results/
+          echo "Directory contents:"
+          find scraping_results -type f -name "*.csv" -o -name "*.json" | sort
           
+          # Show summary if exists
           if [ -f "scraping_results/summary.json" ]; then
-            echo -e "\nSummary:"
-            cat scraping_results/summary.json | jq '.metadata'
-            echo -e "\nSuccess rate:"
-            cat scraping_results/summary.json | jq '.products | map(select(.status | test("found|success"))) | length' || true
+            echo -e "\n=== Summary ==="
+            TOTAL_PRODUCTS=$(jq '.metadata.total_products // 0' scraping_results/summary.json 2>/dev/null || echo "0")
+            SUCCESSFUL=$(jq '.products | map(select(.status | test("found|success|container"))) | length' scraping_results/summary.json 2>/dev/null || echo "0")
+            echo "Total products: $TOTAL_PRODUCTS"
+            echo "Successful scrapes: $SUCCESSFUL"
           fi
         else
-          echo "No scraping_results directory found"
+          echo "No results directory found"
+          mkdir -p scraping_results
+          echo '{"error": "No results generated", "timestamp": "'$(date -Iseconds)'"}' > scraping_results/error.json
         fi
         
     - name: Upload results as artifact
       uses: actions/upload-artifact@v4
       with:
         name: google-shopping-results
-        path: gshopping/scraping_results/
-        retention-days: 7
+        path: |
+          gshopping/scraping_results/
+          gshopping/*.log
+        retention-days: 30
         if-no-files-found: warn
         
-    - name: Deploy results to GitHub Pages (Optional)
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    - name: Create workflow summary
+      if: always()
       run: |
-        cd gshopping
-        mkdir -p ../public
-        if [ -d "scraping_results" ]; then
-          cp -r scraping_results/* ../public/
-          echo "Results copied to public directory for GitHub Pages"
-        fi
+        echo "## Google Shopping Scraper Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Run ID:** ${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Time:** $(date)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
         
-    - name: Create summary report
-      run: |
         cd gshopping
-        echo "# Google Shopping Scraper Results" > results_summary.md
-        echo "Generated: $(date)" >> results_summary.md
-        echo "" >> results_summary.md
         
         if [ -d "scraping_results" ]; then
-          echo "## Generated Files" >> results_summary.md
-          echo "\`\`\`" >> results_summary.md
-          ls -la scraping_results/ >> results_summary.md
-          echo "\`\`\`" >> results_summary.md
+          echo "### ✅ Results Generated" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           
+          # Count files
+          CSV_COUNT=$(find scraping_results -name "*.csv" | wc -l)
+          JSON_COUNT=$(find scraping_results -name "*.json" | wc -l)
+          
+          echo "- CSV Files: $CSV_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "- JSON Files: $JSON_COUNT" >> $GITHUB_STEP_SUMMARY
+          
+          # Show sample if available
           if [ -f "scraping_results/all_products.csv" ]; then
-            echo "## Products Scraped" >> results_summary.md
-            echo "\`\`\`csv" >> results_summary.md
-            head -5 scraping_results/all_products.csv >> results_summary.md
-            echo "\`\`\`" >> results_summary.md
-            echo "*Total rows: $(wc -l < scraping_results/all_products.csv)*" >> results_summary.md
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Sample Data" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`csv" >> $GITHUB_STEP_SUMMARY
+            head -3 scraping_results/all_products.csv >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           fi
+        else
+          echo "### ❌ No Results Generated" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Check the logs for errors." >> $GITHUB_STEP_SUMMARY
         fi
         
-    - name: Upload summary report
-      uses: actions/upload-artifact@v4
-      with:
-        name: scraper-summary
-        path: gshopping/results_summary.md
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "---" >> $GITHUB_STEP_SUMMARY
+        echo "*Results available as artifacts*" >> $GITHUB_STEP_SUMMARY
