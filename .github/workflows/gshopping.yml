@@ -253,7 +253,7 @@ jobs:
             echo "Uploading $PRODUCT_FILE..."
             
             # Create lftp script
-            cat > /tmp/lftp_script.lftp << 'LFTP_SCRIPT'
+                        cat > /tmp/lftp_script.lftp << 'LFTP_SCRIPT'
             set ftp:ssl-allow no
             open ${{ secrets.FTP_HOST }}
             user ${{ secrets.FTP_USER }} ${{ secrets.FTP_PASS }}
@@ -282,7 +282,7 @@ jobs:
                         echo "Uploading $SELLER_FILE..."
                         
                         # Create lftp script
-                        cat > /tmp/lftp_script2.lftp << LFTP_SCRIPT2
+                                    cat > /tmp/lftp_script2.lftp << LFTP_SCRIPT2
             set ftp:ssl-allow no
             open ${{ secrets.FTP_HOST }}
             user ${{ secrets.FTP_USER }} ${{ secrets.FTP_PASS }}
