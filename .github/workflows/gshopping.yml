@@ -2,23 +2,39 @@ name: Google Shopping Scraper
 
 on:
   workflow_dispatch:
+    inputs:
+      input_filename:
+        description: 'Input CSV filename on FTP'
+        required: true
+        default: 'google_shopping.csv'
+        type: string
+      total_chunks:
+        description: 'Number of chunks to split into'
+        required: true
+        default: '4'
+        type: string
   schedule:
     - cron: "0 2 * * *"   # daily at 02:00 UTC
 
 jobs:
   scrape:
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
-
+    timeout-minutes: 120
+    
+    strategy:
+      matrix:
+        chunk_id: [1, 2, 3, 4]
+      max-parallel: 2  # Run max 2 instances at a time to avoid overwhelming
+    
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
-
+      
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-
+      
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -26,41 +42,221 @@ jobs:
             google-chrome-stable \
             ffmpeg \
             pulseaudio \
-            xvfb
-
+            xvfb \
+            lftp
+      
       - name: Create virtualenv
         run: |
           python -m venv venv
           source venv/bin/activate
           pip install --upgrade pip
-
+      
       - name: Install Python dependencies
         run: |
           source venv/bin/activate
           pip install \
-            selenium \
-            undetected-chromedriver \
-            beautifulsoup4 \
-            requests \
-            lxml \
-            pydub \
-            pandas \
-            fake-useragent \
-            python-dateutil \
-            SpeechRecognition
-
-      - name: Run scraper (headless via Xvfb)
+            selenium==4.18.1 \
+            undetected-chromedriver==3.5.4 \
+            beautifulsoup4==4.12.2 \
+            requests==2.31.0 \
+            lxml==4.9.3 \
+            pydub==0.25.1 \
+            pandas==2.1.4 \
+            fake-useragent==1.4.0 \
+            python-dateutil==2.8.2 \
+            SpeechRecognition==3.10.0
+      
+      - name: Copy main script to workspace
+        run: |
+          # Copy your scraper script to the workspace
+          # This assumes your script is in a different location
+          # Adjust the path as needed
+          if [ -f "gshopping/gscrapper.py" ]; then
+            # Create main.py from your existing script or copy it
+            echo "Copying existing scraper..."
+            cp gshopping/gscrapper.py main.py
+          else
+            echo "Using default main.py from repository"
+          fi
+      
+      - name: Run scraper with matrix strategy
         env:
           DISPLAY: :99
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_PORT: ${{ secrets.FTP_PORT }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_PATH: ${{ secrets.FTP_PATH }}
+          CHUNK_ID: ${{ matrix.chunk_id }}
         run: |
           source venv/bin/activate
+          
+          # Start Xvfb for headless browser
           Xvfb :99 -screen 0 1920x1080x24 &
           sleep 3
-          python gshopping/gscrapper.py
-
-      - name: Upload scraping results
+          
+          # Get input parameters
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            INPUT_FILE="${{ github.event.inputs.input_filename }}"
+            TOTAL_CHUNKS="${{ github.event.inputs.total_chunks }}"
+          else
+            # Default values for scheduled runs
+            INPUT_FILE="google_shopping.csv"
+            TOTAL_CHUNKS="4"
+          fi
+          
+          echo "========================================"
+          echo "Google Shopping Scraper - Chunk Processing"
+          echo "========================================"
+          echo "Chunk ID: ${{ matrix.chunk_id }}"
+          echo "Total Chunks: $TOTAL_CHUNKS"
+          echo "Input File: $INPUT_FILE"
+          echo "FTP Path: $FTP_PATH"
+          echo "========================================"
+          
+          # Run the scraper with chunk parameters
+          python main.py \
+            --chunk-id ${{ matrix.chunk_id }} \
+            --total-chunks $TOTAL_CHUNKS \
+            --input-file "$INPUT_FILE"
+      
+      - name: Upload artifacts for debugging
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scraping-results
-          path: scraping_results/
+          name: scraping-results-chunk-${{ matrix.chunk_id }}
+          path: |
+            output/
+            logs/
+          retention-days: 1
+  
+  merge-results:
+    runs-on: ubuntu-22.04
+    needs: scrape
+    if: always()
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Merge CSV files
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_PATH: ${{ secrets.FTP_PATH }}
+        run: |
+          python -c "
+          import os
+          import pandas as pd
+          import glob
+          from datetime import datetime
+          
+          # Find all CSV files
+          product_files = glob.glob('artifacts/**/product_info*.csv', recursive=True)
+          seller_files = glob.glob('artifacts/**/seller_info*.csv', recursive=True)
+          
+          print(f'Found {len(product_files)} product files')
+          print(f'Found {len(seller_files)} seller files')
+          
+          # Merge product files
+          if product_files:
+              product_dfs = [pd.read_csv(f) for f in product_files]
+              merged_products = pd.concat(product_dfs, ignore_index=True)
+              
+              # Sort by product_id
+              merged_products = merged_products.sort_values('product_id')
+              
+              # Save merged file
+              timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+              merged_product_file = f'merged_products_{timestamp}.csv'
+              merged_products.to_csv(merged_product_file, index=False)
+              print(f'Saved merged products: {merged_product_file}')
+              
+              # Save summary
+              summary = {
+                  'total_products': len(merged_products),
+                  'successful_scrapes': len(merged_products[merged_products['status'] == 'completed']),
+                  'failed_scrapes': len(merged_products[merged_products['status'] == 'error']),
+                  'with_osb_position': len(merged_products[merged_products['osb_position'] > 0]),
+                  'timestamp': timestamp
+              }
+              
+              print('\\nScraping Summary:')
+              for key, value in summary.items():
+                  print(f'{key}: {value}')
+          
+          # Merge seller files
+          if seller_files:
+              seller_dfs = [pd.read_csv(f) for f in seller_files]
+              merged_sellers = pd.concat(seller_dfs, ignore_index=True)
+              
+              # Sort by product_id and seller
+              merged_sellers = merged_sellers.sort_values(['product_id', 'seller'])
+              
+              # Save merged file
+              timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+              merged_seller_file = f'merged_sellers_{timestamp}.csv'
+              merged_sellers.to_csv(merged_seller_file, index=False)
+              print(f'Saved merged sellers: {merged_seller_file}')
+              
+              print(f'\\nTotal sellers found: {len(merged_sellers)}')
+          
+          print('\\nMerge completed!')
+          "
+      
+      - name: Upload merged results as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: merged-scraping-results
+          path: |
+            merged_products_*.csv
+            merged_sellers_*.csv
+          retention-days: 7
+  
+  notify:
+    runs-on: ubuntu-22.04
+    needs: [scrape, merge-results]
+    if: always()
+    
+    steps:
+      - name: Download merged results
+        uses: actions/download-artifact@v4
+        with:
+          name: merged-scraping-results
+      
+      - name: Count results
+        run: |
+          echo "=== Scraping Results Summary ==="
+          echo ""
+          
+          # Count CSV rows
+          if [ -f "merged_products_"*.csv ]; then
+            product_file=$(ls merged_products_*.csv | head -1)
+            product_count=$(wc -l < "$product_file" || echo "0")
+            echo "Total Products: $((product_count - 1))"  # Subtract header
+          else
+            echo "Total Products: 0 (No product file found)"
+          fi
+          
+          if [ -f "merged_sellers_"*.csv ]; then
+            seller_file=$(ls merged_sellers_*.csv | head -1)
+            seller_count=$(wc -l < "$seller_file" || echo "0")
+            echo "Total Sellers: $((seller_count - 1))"  # Subtract header
+          else
+            echo "Total Sellers: 0 (No seller file found)"
+          fi
+          
+          echo ""
+          echo "Workflow completed at: $(date)"
+          echo "GitHub Run ID: $GITHUB_RUN_ID"

@@ -1,11 +1,8 @@
-#!/usr/bin/env python3
-"""
-Google Shopping Scraper - GitHub Actions Optimized Version
-"""
-
 import sys
 import json
 import random
+import ftplib
+import os
 from datetime import datetime
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
@@ -15,281 +12,513 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import NoSuchElementException
 import undetected_chromedriver as uc
-import os
 import csv
 import traceback
-import logging
+import pandas as pd
+import argparse
 
-# Setup logging for GitHub Actions
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
+def setup_driver():
+    time.sleep(2)
+    options = uc.ChromeOptions()
+    
+    # if os.getenv("GITHUB_ACTIONS") == "true":
+    #     options.add_argument("--headless=new")
+    
+    options.add_argument("--start-maximized")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-infobars")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-popup-blocking")
+    options.add_argument("--disable-logging")
+    options.add_argument("--log-level=3")
+    options.add_argument("--remote-debugging-port=9222")
+    options.add_argument("--disable-background-timer-throttling")
+    options.add_argument("--disable-backgrounding-occluded-windows")
+    options.add_argument("--disable-ipc-flooding-protection")
+    options.add_argument("--enable-features=NetworkService,NetworkServiceInProcess")
+    options.add_argument("--disable-renderer-backgrounding")
+
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
     ]
-)
-logger = logging.getLogger(__name__)
+    options.add_argument(f"user-agent={random.choice(user_agents)}")
 
-def setup_driver_github():
-    """Setup Chrome driver optimized for GitHub Actions"""
-    try:
-        # Clean up any existing Chrome processes
-        os.system("pkill -f chrome 2>/dev/null || true")
-        time.sleep(2)
-        
-        options = uc.ChromeOptions()
-        
-        # Headless mode for GitHub Actions
-        options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--window-size=1920,1080")
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_argument("--disable-infobars")
-        options.add_argument("--disable-extensions")
-        options.add_argument("--disable-popup-blocking")
-        options.add_argument("--log-level=3")
-        options.add_argument("--remote-debugging-port=9222")
-        
-        # User agents compatible with headless mode
-        user_agents = [
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/120.0.0.0 Safari/537.36",
-        ]
-        options.add_argument(f"user-agent={random.choice(user_agents)}")
-        
-        logger.info("Setting up Chrome driver for GitHub Actions...")
-        driver = uc.Chrome(options=options)
-        
-        logger.info("Chrome driver setup successful")
-        return driver
-        
-    except Exception as e:
-        logger.error(f"Failed to setup Chrome driver: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise
+    driver = uc.Chrome(options=options)
+    return driver
 
-def save_to_csv_fixed(data, filename):
-    """Save data to CSV with proper header handling"""
-    if not data:
-        logger.warning(f"No data to save to {filename}")
-        return
-    
-    # Create directory if it doesn't exist
-    os.makedirs('scraping_results', exist_ok=True)
-    filepath = os.path.join('scraping_results', filename)
-    
+def download_csv_from_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, remote_filename, local_filename):
+    """Download CSV file from FTP"""
     try:
-        # Get all unique keys from all dictionaries
-        all_keys = set()
-        for item in data:
-            if isinstance(item, dict):
-                all_keys.update(item.keys())
+        print(f"Downloading {remote_filename} from FTP...")
         
-        if not all_keys:
-            logger.warning(f"No valid data for {filename}")
-            return
+        ftp = ftplib.FTP()
+        ftp.connect(ftp_host, 21)
+        ftp.login(ftp_user, ftp_pass)
+        ftp.set_pasv(True)
         
-        headers = list(all_keys)
-        
-        with open(filepath, 'w', newline='', encoding='utf-8') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=headers)
-            writer.writeheader()
-            
-            for row in data:
-                # Ensure all keys are present
-                row_data = row.copy()
-                for header in headers:
-                    if header not in row_data:
-                        row_data[header] = ''
-                writer.writerow(row_data)
-        
-        logger.info(f"✅ Saved {len(data)} rows to {filename}")
-        
-    except Exception as e:
-        logger.error(f"❌ Error saving {filename}: {str(e)}")
-
-def load_product_urls():
-    """Load product URLs with fallback"""
-    try:
-        with open('product_urls.json', 'r') as f:
-            data = json.load(f)
-            logger.info(f"Loaded {len(data)} products from product_urls.json")
-            return data
-    except FileNotFoundError:
-        logger.warning("product_urls.json not found, creating sample data")
-        sample_data = [
-            {
-                "product_id": 1,
-                "url": "https://www.google.com/search?q=office+chair&tbm=shop&gl=US&hl=en",
-                "keyword": "office chair"
-            },
-            {
-                "product_id": 2,
-                "url": "https://www.google.com/search?q=wireless+headphones&tbm=shop&gl=US&hl=en",
-                "keyword": "wireless headphones"
-            }
-        ]
-        with open('product_urls.json', 'w') as f:
-            json.dump(sample_data, f, indent=2)
-        return sample_data
-    except Exception as e:
-        logger.error(f"Error loading product URLs: {str(e)}")
-        return []
-
-def simple_scrape_product(driver, url, product_id, keyword):
-    """Simplified scraping function for GitHub Actions"""
-    result = {
-        'product_id': product_id,
-        'keyword': keyword,
-        'url': url,
-        'timestamp': datetime.now().isoformat(),
-        'status': 'started'
-    }
-    
-    try:
-        logger.info(f"Scraping product {product_id}: {keyword}")
-        driver.get(url)
-        time.sleep(random.uniform(3, 5))
-        
-        # Basic page info
-        result['page_title'] = driver.title
-        result['current_url'] = driver.current_url
-        
-        # Try to find shopping elements
-        try:
-            # Look for common shopping selectors
-            selectors = [
-                "div.sh-dgr__content",
-                "div[data-initq]",
-                "div.sh-dlr__list-result",
-                "div.MtXiu"
-            ]
-            
-            for selector in selectors:
-                elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                if elements:
-                    result['elements_found'] = len(elements)
-                    result['selector_used'] = selector
-                    
-                    # Get sample text from first element
-                    if elements[0].text:
-                        result['sample_text'] = elements[0].text[:200]
-                    
-                    result['status'] = 'elements_found'
-                    break
-            
-            if 'elements_found' not in result:
-                result['status'] = 'no_elements_found'
-                
-        except Exception as e:
-            result['status'] = 'element_error'
-            result['error'] = str(e)[:100]
-            
-    except Exception as e:
-        result['status'] = 'failed'
-        result['error'] = str(e)[:100]
-    
-    return result
-
-def main_github():
-    """Main function optimized for GitHub Actions"""
-    logger.info("=" * 60)
-    logger.info("🚀 Starting Google Shopping Scraper (GitHub Actions)")
-    logger.info("=" * 60)
-    
-    # Load products
-    products = load_product_urls()
-    if not products:
-        logger.error("No products to scrape. Exiting.")
-        return
-    
-    logger.info(f"📋 Found {len(products)} products to scrape")
-    
-    # Initialize results
-    all_results = {
-        'products': [],
-        'metadata': {
-            'start_time': datetime.now().isoformat(),
-            'total_products': len(products),
-            'environment': 'github-actions'
-        }
-    }
-    
-    driver = None
-    try:
-        driver = setup_driver_github()
-        
-        for i, product in enumerate(products, 1):
-            product_id = product.get('product_id', i)
-            url = product.get('url', '')
-            keyword = product.get('keyword', f'Product {product_id}')
-            
-            logger.info(f"\n[{i}/{len(products)}] Processing: {keyword}")
-            
-            # Scrape the product
-            result = simple_scrape_product(driver, url, product_id, keyword)
-            all_results['products'].append(result)
-            
-            # Log result
-            logger.info(f"  Status: {result.get('status')}")
-            if 'error' in result:
-                logger.warning(f"  Error: {result.get('error')}")
-            
-            # Add delay between requests
-            if i < len(products):
-                delay = random.uniform(5, 8)
-                logger.info(f"  ⏳ Waiting {delay:.1f} seconds...")
-                time.sleep(delay)
-        
-        # Update metadata
-        all_results['metadata']['end_time'] = datetime.now().isoformat()
-        all_results['metadata']['successful'] = len([
-            p for p in all_results['products'] 
-            if p.get('status') in ['elements_found', 'completed']
-        ])
-        
-    except Exception as e:
-        logger.error(f"❌ Fatal error: {str(e)}")
-        logger.error(traceback.format_exc())
-    finally:
-        if driver:
+        if ftp_path and ftp_path != '/':
             try:
-                driver.quit()
-                logger.info("✅ Chrome driver closed")
+                ftp.cwd(ftp_path)
             except:
-                pass
-    
-    # Save results
-    if all_results['products']:
-        save_to_csv_fixed(all_results['products'], 'github_products.csv')
+                print(f"Error: Could not change to directory {ftp_path}")
+                return None
         
-        # Also save summary
+        with open(local_filename, 'wb') as f:
+            ftp.retrbinary(f'RETR {remote_filename}', f.write)
+        
+        ftp.quit()
+        print(f"✓ Downloaded {remote_filename} to {local_filename}")
+        return local_filename
+        
+    except Exception as e:
+        print(f"Error downloading from FTP: {str(e)}")
+        return None
+
+def upload_to_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, local_file, remote_filename):
+    """Upload file to FTP server"""
+    try:
+        print(f"Uploading {remote_filename} to FTP...")
+        
+        ftp = ftplib.FTP()
+        ftp.connect(ftp_host, 21)
+        ftp.login(ftp_user, ftp_pass)
+        ftp.set_pasv(True)
+        
+        if ftp_path and ftp_path != '/':
+            try:
+                ftp.cwd(ftp_path)
+            except:
+                dirs = ftp_path.strip('/').split('/')
+                current_path = ''
+                for dir in dirs:
+                    current_path += '/' + dir
+                    try:
+                        ftp.cwd(current_path)
+                    except:
+                        ftp.mkd(current_path)
+                        ftp.cwd(current_path)
+        
+        with open(local_file, 'rb') as f:
+            ftp.storbinary(f'STOR {remote_filename}', f)
+        
+        ftp.quit()
+        print(f"✓ Uploaded {remote_filename} to FTP")
+        return True
+        
+    except Exception as e:
+        print(f"Error uploading to FTP: {str(e)}")
+        return False
+
+def split_csv(input_csv, output_dir, chunk_id, total_chunks):
+    """Split CSV into chunks and return specific chunk"""
+    try:
+        df = pd.read_csv(input_csv)
+        
+        if df.empty:
+            print("CSV file is empty")
+            return None
+        
+        total_rows = len(df)
+        rows_per_chunk = total_rows // total_chunks
+        
+        start_idx = (chunk_id - 1) * rows_per_chunk
+        end_idx = chunk_id * rows_per_chunk if chunk_id < total_chunks else total_rows
+        
+        chunk_df = df.iloc[start_idx:end_idx]
+        
+        os.makedirs(output_dir, exist_ok=True)
+        chunk_filename = f"chunk_{chunk_id}.csv"
+        chunk_path = os.path.join(output_dir, chunk_filename)
+        
+        chunk_df.to_csv(chunk_path, index=False)
+        
+        print(f"Chunk {chunk_id}: Rows {start_idx+1} to {end_idx} ({len(chunk_df)} rows)")
+        return chunk_path
+        
+    except Exception as e:
+        print(f"Error splitting CSV: {str(e)}")
+        return None
+
+def scrape_product(driver, product_id, keyword, url):
+    """Scrape individual product from Google Shopping"""
+    try:
+        print(f"\nScraping Product ID: {product_id}")
+        print(f"Keyword: {keyword}")
+        
+        driver.get(url)
+        time.sleep(random.uniform(5, 10))
+        
+        # Initialize result structure
+        result = {
+            'product_id': product_id,
+            'keyword': keyword,
+            'url': url,
+            'last_response': '',
+            'product_url': '',
+            'seller': '',
+            'product_name': '',
+            'cid': '',
+            'pid': '',
+            'last_fetched_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'osb_position': 0,
+            'osb_id': '',
+            'seller_count': 0,
+            'status': '',
+            'competitors': []
+        }
+        
+        # Try to find product container
         try:
-            summary_file = os.path.join('scraping_results', 'github_summary.json')
-            with open(summary_file, 'w') as f:
-                json.dump(all_results, f, indent=2, default=str)
-            logger.info(f"✅ Summary saved to {summary_file}")
+            mains = driver.find_element(By.CLASS_NAME, "dURPMd")
+            result['last_response'] = "Product container found"
+            result['status'] = "found"
         except Exception as e:
-            logger.error(f"❌ Error saving summary: {str(e)}")
+            result['last_response'] = f"Product container not found: {str(e)}"
+            result['status'] = "container_not_found"
+            return result
+        
+        # Find products in container
+        products = mains.find_elements(By.CLASS_NAME, 'MtXiu')
+        if not products:
+            result['last_response'] = "No products found in container"
+            result['status'] = "no_products"
+            return result
+        
+        # Process first matching product
+        for product in products:
+            try:
+                product_name = product.find_element(By.XPATH, ".//div[contains(@class,'gkQHve')]").text
+            except:
+                product_name = ""
+            
+            try:
+                seller = product.find_element(By.XPATH, ".//span[contains(@class,'WJMUdc')]").text
+            except:
+                seller = ""
+            
+            try:
+                cid = product.get_attribute('id')
+            except:
+                cid = ""
+            
+            # Check for Set keyword mismatch
+            if (not "Set" in product_name and "Set" in keyword) or ("Set" in product_name and not "Set" in keyword):
+                continue
+            
+            result.update({
+                'product_name': product_name,
+                'seller': seller,
+                'cid': cid,
+                'pid': '',
+                'status': 'product_found'
+            })
+            break
+        
+        if not result['product_name']:
+            result['last_response'] = "No matching product found"
+            result['status'] = "no_match"
+            return result
+        
+        # Click on product if CID exists
+        if result['cid']:
+            try:
+                element = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, f'//div[@id="{result["cid"]}"]'))
+                )
+                if element:
+                    driver.execute_script("arguments[0].scrollIntoView(true);", element)
+                    time.sleep(1)
+                    element.click()
+                    result['last_response'] = "Clicked on product successfully"
+                    time.sleep(random.uniform(1, 3))
+            except:
+                result['last_response'] = "Could not click product element"
+        
+        result['product_url'] = driver.current_url
+        
+        # Try to get more stores
+        i = 0
+        while i < 2:
+            try:
+                more_stores = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, "//div[contains(@class,'duf-h')]//div[@role='button']"))
+                )
+                more_stores.click()
+                time.sleep(random.uniform(2, 4))
+                i += 1
+            except:
+                break
+        
+        # Try to find offers grid
+        try:
+            offers_grid = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, "//div[@jsname='RSFNod' and @data-attrid='organic_offers_grid']"))
+            )
+            
+            offer_elements = offers_grid.find_elements(By.CLASS_NAME, 'R5K7Cb')
+            print(f"Found {len(offer_elements)} offers")
+            
+            competitors = []
+            for seller_html in offer_elements:
+                try:
+                    store_name = seller_html.find_element(By.CSS_SELECTOR, "div.hP4iBf.gUf0b.uWvFpd").text.strip()
+                except:
+                    store_name = "N/A"
+                
+                try:
+                    seller_product_name = seller_html.find_element(By.CSS_SELECTOR, "div.Rp8BL").text.strip()
+                except:
+                    seller_product_name = "N/A"
+                
+                try:
+                    seller_url = seller_html.find_element(By.CSS_SELECTOR, "a.P9159d").get_attribute('href')
+                except:
+                    seller_url = "N/A"
+                
+                try:
+                    seller_price_element = seller_html.find_element(By.CSS_SELECTOR, "div.QcEgce span[aria-hidden='true']")
+                    seller_price = seller_price_element.text.strip()
+                except:
+                    try:
+                        seller_price_element = seller_html.find_element(By.CSS_SELECTOR, "div.GBgquf span")
+                        seller_price = seller_price_element.text.strip()
+                    except:
+                        seller_price = "N/A"
+                
+                competitor_data = {
+                    'product_id': product_id,
+                    'seller': store_name,
+                    'seller_product_name': seller_product_name,
+                    'seller_url': seller_url,
+                    'seller_price': seller_price,
+                    'last_fetched_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+                
+                competitors.append(competitor_data)
+                result['competitors'].append(competitor_data)
+            
+            # Calculate OSB position
+            search_seller = '1StopBedrooms'
+            sellers = [c['seller'] for c in competitors]
+            osb_position = 0
+            seller_count = len(sellers)
+            osb_id = ''
+            
+            if search_seller in sellers:
+                osb_position = sellers.index(search_seller) + 1
+                for competitor in competitors:
+                    if competitor['seller'] == search_seller:
+                        osb_id = competitor.get('seller_url', '').split('/')[-1] if competitor.get('seller_url') else ''
+                        break
+            
+            result.update({
+                'osb_position': osb_position,
+                'seller_count': seller_count,
+                'osb_id': osb_id,
+                'status': 'completed',
+                'last_response': f'Completed - OSB Position: {osb_position}, Total Sellers: {seller_count}'
+            })
+            
+        except Exception as e:
+            result['status'] = 'no_offers_found'
+            result['last_response'] = f'No offers found: {str(e)}'
+        
+        return result
+        
+    except Exception as e:
+        print(f"Error scraping product {product_id}: {str(e)}")
+        return {
+            'product_id': product_id,
+            'keyword': keyword,
+            'url': url,
+            'last_response': f'Error: {str(e)}',
+            'status': 'error',
+            'last_fetched_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'competitors': []
+        }
+
+def process_chunk(chunk_file, chunk_id, total_chunks):
+    """Process a chunk of products"""
+    try:
+        # Get FTP credentials from environment
+        ftp_host = os.getenv('FTP_HOST')
+        ftp_user = os.getenv('FTP_USER')
+        ftp_pass = os.getenv('FTP_PASS')
+        ftp_path = os.getenv('FTP_PATH', '/scrap/')
+        
+        if not all([ftp_host, ftp_user, ftp_pass]):
+            print("Error: FTP credentials not found")
+            return False
+        
+        # Read chunk file
+        df = pd.read_csv(chunk_file)
+        print(f"Processing {len(df)} products from chunk {chunk_id}")
+        
+        # Initialize results
+        product_results = []
+        seller_results = []
+        
+        # Setup driver
+        driver = setup_driver()
+        
+        # Process each product
+        for index, row in df.iterrows():
+            product_id = row['product_id']
+            web_id = row['web_id']
+            keyword = row['keyword']
+            url = row['url']
+            osb_url = row['osb_url']
+            
+            print(f"\nProcessing {index+1}/{len(df)}: Product ID {product_id}")
+            
+            # Scrape product
+            scraped_data = scrape_product(driver, product_id, keyword, url)
+            
+            # Add original fields back
+            scraped_data['web_id'] = web_id
+            scraped_data['osb_url'] = osb_url
+            
+            # Add to results
+            product_results.append(scraped_data)
+            seller_results.extend(scraped_data['competitors'])
+            
+            # Sleep between products
+            if index < len(df) - 1:
+                time.sleep(random.uniform(3, 6))
+        
+        # Close driver
+        driver.quit()
+        
+        # Create CSV 1: Product Information
+        csv1_data = []
+        for result in product_results:
+            csv1_row = {
+                'product_id': result['product_id'],
+                'web_id': result['web_id'],
+                'keyword': result['keyword'],
+                'url': result['url'],
+                'osb_url': result['osb_url'],
+                'last_response': result['last_response'],
+                'product_url': result['product_url'],
+                'seller': result['seller'],
+                'product_name': result['product_name'],
+                'cid': result['cid'],
+                'pid': result['pid'],
+                'last_fetched_date': result['last_fetched_date'],
+                'osb_position': result['osb_position'],
+                'osb_id': result['osb_id'],
+                'seller_count': result['seller_count'],
+                'status': result['status']
+            }
+            csv1_data.append(csv1_row)
+        
+        # Create CSV 2: Seller Information
+        csv2_data = []
+        for seller in seller_results:
+            csv2_row = {
+                'product_id': seller['product_id'],
+                'seller': seller['seller'],
+                'seller_product_name': seller['seller_product_name'],
+                'seller_url': seller['seller_url'],
+                'seller_price': seller['seller_price'],
+                'last_fetched_date': seller['last_fetched_date']
+            }
+            csv2_data.append(csv2_row)
+        
+        # Save CSV files locally
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = 'output'
+        os.makedirs(output_dir, exist_ok=True)
+        
+        csv1_filename = f"product_info_chunk{chunk_id}_{timestamp}.csv"
+        csv2_filename = f"seller_info_chunk{chunk_id}_{timestamp}.csv"
+        
+        csv1_path = os.path.join(output_dir, csv1_filename)
+        csv2_path = os.path.join(output_dir, csv2_filename)
+        
+        if csv1_data:
+            pd.DataFrame(csv1_data).to_csv(csv1_path, index=False)
+            print(f"✓ Saved product info: {csv1_filename}")
+        
+        if csv2_data:
+            pd.DataFrame(csv2_data).to_csv(csv2_path, index=False)
+            print(f"✓ Saved seller info: {csv2_filename}")
+        
+        # Upload to FTP
+        if csv1_data:
+            upload_to_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, csv1_path, csv1_filename)
+        
+        if csv2_data:
+            upload_to_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, csv2_path, csv2_filename)
+        
+        print(f"\n✓ Chunk {chunk_id} processing completed")
+        return True
+        
+    except Exception as e:
+        print(f"Error processing chunk {chunk_id}: {str(e)}")
+        traceback.print_exc()
+        return False
+
+def main():
+    parser = argparse.ArgumentParser(description='Google Shopping Scraper')
+    parser.add_argument('--chunk-id', type=int, required=True, help='Chunk ID (1-based)')
+    parser.add_argument('--total-chunks', type=int, required=True, help='Total number of chunks')
+    parser.add_argument('--input-file', type=str, required=True, help='Input CSV filename on FTP')
     
-    # Final statistics
-    logger.info("=" * 60)
-    logger.info("📊 SCRAPING COMPLETED")
-    logger.info("=" * 60)
-    logger.info(f"Total products: {len(products)}")
-    logger.info(f"Results saved to: scraping_results/")
+    args = parser.parse_args()
+    
+    print("=" * 60)
+    print("Google Shopping Scraper")
+    print(f"Chunk: {args.chunk_id} of {args.total_chunks}")
+    print(f"Input file: {args.input_file}")
+    print("=" * 60)
+    
+    # Get FTP credentials
+    ftp_host = os.getenv('FTP_HOST')
+    ftp_user = os.getenv('FTP_USER')
+    ftp_pass = os.getenv('FTP_PASS')
+    ftp_path = os.getenv('FTP_PATH', '/scrap/')
+    
+    if not all([ftp_host, ftp_user, ftp_pass]):
+        print("Error: FTP credentials not found in environment variables")
+        sys.exit(1)
+    
+    # Download input CSV from FTP
+    input_csv = 'input.csv'
+    if not download_csv_from_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, args.input_file, input_csv):
+        print("Failed to download input CSV")
+        sys.exit(1)
+    
+    # Split CSV and get our chunk
+    chunk_file = split_csv(input_csv, 'chunks', args.chunk_id, args.total_chunks)
+    if not chunk_file:
+        print("Failed to split CSV")
+        sys.exit(1)
+    
+    # Process the chunk
+    success = process_chunk(chunk_file, args.chunk_id, args.total_chunks)
+    
+    # Clean up
+    try:
+        os.remove(input_csv)
+        os.remove(chunk_file)
+        import shutil
+        shutil.rmtree('chunks', ignore_errors=True)
+    except:
+        pass
+    
+    if success:
+        print("\n✓ Processing completed successfully")
+        sys.exit(0)
+    else:
+        print("\n✗ Processing failed")
+        sys.exit(1)
 
 if __name__ == "__main__":
-    # Determine which mode to run
-    if os.environ.get('GITHUB_ACTIONS') == 'true':
-        main_github()
-    else:
-        # Import and run your original main if exists
-        try:
-            from gscrapper import main as original_main
-            original_main()
-        except ImportError:
-            print("Running in GitHub Actions mode...")
-            main_github()
+    main()

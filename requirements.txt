@@ -13,3 +13,24 @@ openpyxl>=3.0.0  # For Excel support
 # playwright>=1.30.0
 # pymongo>=4.3.0  # For MongoDB storage
 # sqlalchemy>=2.0.0  # For database storage
+
+# Ashley Furniture Scraper Requirements
+# Core scraping packages
+playwright>=1.40.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+lxml>=4.9.0
+
+# Anti-detection & utilities
+fake-useragent>=1.4.0
+python-dateutil>=2.8.2
+pandas>=2.0.0
+tqdm>=4.66.0
+colorama>=0.4.6
+
+# For handling CAPTCHAs (optional)
+# twocaptcha-python>=1.0.0
+# pytz>=2023.3
+
+# For proxy rotation (optional)
+# proxy-py>=0.3.0
