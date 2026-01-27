@@ -11,7 +11,7 @@ on:
       total_chunks:
         description: 'Number of chunks to split into'
         required: true
-        default: '4'
+        default: '1'
         type: string
   schedule:
     - cron: "0 2 * * *"   # daily at 02:00 UTC
@@ -23,7 +23,7 @@ jobs:
     
     strategy:
       matrix:
-        chunk_id: [1, 2, 3, 4]
+        chunk_id: [1]
       max-parallel: 2  # Run max 2 instances at a time
     
     steps:
