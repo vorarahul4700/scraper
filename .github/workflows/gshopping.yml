@@ -71,10 +71,10 @@ jobs:
           # Copy your scraper script to the workspace
           # This assumes your script is in a different location
           # Adjust the path as needed
-          if [ -f "gshopping/gscrapper.py" ]; then
+          if [ -f "gshopping/gscrapperci.py" ]; then
             # Create main.py from your existing script or copy it
             echo "Copying existing scraper..."
-            cp gshopping/gscrapper.py main.py
+            cp gshopping/gscrapperci.py main.py
           else
             echo "Using default main.py from repository"
           fi
