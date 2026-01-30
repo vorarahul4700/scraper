@@ -141,7 +141,6 @@ session.headers.update({
 def fetch_json(url: str) -> Optional[dict]:
     """Fetch JSON data with proper headers"""
     try:
-        # Headers specifically for JSON/API requests
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -152,19 +151,23 @@ def fetch_json(url: str) -> Optional[dict]:
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
         }
-        
+
         r = session.get(url, headers=headers, timeout=15, verify=True)
+
+        # 🔥 DEBUG: print everything and die
+        print("STATUS:", r.status_code)
+        print("HEADERS:", r.headers)
+        print("TEXT RESPONSE:\n", r.text)
+        sys.exit(0)
+
+        # unreachable, but kept for clarity
         if r.status_code == 200:
             return r.json()
-        else:
-            logger.warning(f"JSON fetch failed: {r.status_code} for {url}", "WARNING")
-            return None
-    except json.JSONDecodeError as e:
-        logger.warning(f"JSON decode error for {url}: {e}", "ERROR")
         return None
+
     except Exception as e:
-        logger.warning(f"Error fetching JSON from {url}: {e}", "ERROR")
-        return None
+        print("ERROR:", e)
+        sys.exit(1)
 
 # ================= DATA PROCESSING =================
 
