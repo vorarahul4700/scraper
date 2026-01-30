@@ -138,7 +138,7 @@ session.headers.update({
 #         logger.warning(f"All retries failed for {url}: {type(e).__name__}")
 #         return None
 
-def fetch_json(url: str) -> Optional[dict]:
+def fetch_json(api_url: str) -> Optional[dict]:
     response = requests.get(api_url, timeout=10)
     response.raise_for_status()
     return response.json()
