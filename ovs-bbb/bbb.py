@@ -17,9 +17,9 @@ import time
 import re
 import csv
 import gc
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, ThreadPoolExecutor
 import urllib3
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, wait_fixed
 
 # Suppress SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -44,126 +44,104 @@ def setup_logging(chunk_id: int):
 # ================= HTTP SESSION =================
 
 def create_session():
-    """Create and configure HTTP session with better timeout settings"""
+    """Create and configure HTTP session with better timeout settings for GitHub Actions"""
     session = requests.Session()
-    # Use a more realistic user agent
+    
+    # More realistic headers for BBB API
     session.headers.update({
-        # "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
         "Accept-Language": "en-US,en;q=0.9",
-        # "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
     })
     
-    # # Increase adapter pool size and timeout
-    # adapter = requests.adapters.HTTPAdapter(
-    #     pool_connections=20,
-    #     pool_maxsize=100,
-    #     max_retries=3,
-    #     pool_block=False
-    # )
-    # session.mount('https://', adapter)
-    # session.mount('http://', adapter)
+    # Configure adapter with larger timeouts for GitHub Actions
+    adapter = requests.adapters.HTTPAdapter(
+        pool_connections=10,
+        pool_maxsize=20,
+        max_retries=3,
+        pool_block=False
+    )
+    session.mount('https://', adapter)
+    session.mount('http://', adapter)
     
     return session
 
-session = requests.Session()
-# Add default headers to session for all requests
-session.headers.update({
-    # "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    # "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-})
+# Create a shared session
+session = create_session()
 
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type((requests.exceptions.Timeout, 
-                                  requests.exceptions.ConnectionError,
-                                  requests.exceptions.ChunkedEncodingError))
+    retry=retry_if_exception_type((
+        requests.exceptions.Timeout,
+        requests.exceptions.ConnectionError,
+        requests.exceptions.ChunkedEncodingError,
+        requests.exceptions.ReadTimeout
+    ))
 )
-# def http_get_with_retry(session, url: str) -> Optional[str]:
-#     """HTTP GET request with retry logic"""
-#     try:
-#         # Use shorter timeout for initial request
-#         r = session.get(url, timeout=(5, 10), verify=False)
-        
-#         if r.status_code == 200:
-#             return r.text
-#         elif r.status_code == 404:
-#             logger.warning(f"404 Not Found for {url}")
-#             return None
-#         elif r.status_code == 429:  # Rate limited
-#             logger.warning(f"Rate limited (429) for {url}")
-#             time.sleep(10)  # Longer wait for rate limiting
-#             raise requests.exceptions.RetryError("Rate limited")
-#         elif r.status_code == 403:
-#             logger.warning(f"Access forbidden (403) for {url}")
-#             return None
-#         elif r.status_code >= 500:
-#             logger.warning(f"Server error {r.status_code} for {url}")
-#             time.sleep(2)
-#             raise requests.exceptions.RetryError(f"Server error {r.status_code}")
-#         else:
-#             logger.warning(f"HTTP {r.status_code} for {url}")
-#             return None
-            
-#     except requests.exceptions.Timeout:
-#         logger.warning(f"Timeout for {url}")
-#         raise  # This will trigger retry
-#     except requests.exceptions.ConnectionError:
-#         logger.warning(f"Connection error for {url}")
-#         raise  # This will trigger retry
-#     except Exception as e:
-#         logger.warning(f"Error for {url}: {type(e).__name__}")
-#         return None
-
-# def http_get(session, url: str) -> Optional[str]:
-#     """HTTP GET request with better error handling"""
-#     try:
-#         return http_get_with_retry(session, url)
-#     except Exception as e:
-#         logger.warning(f"All retries failed for {url}: {type(e).__name__}")
-#         return None
-
 def fetch_json(url: str) -> Optional[dict]:
-    """Fetch JSON data with proper headers"""
+    """Fetch JSON data with proper headers and longer timeout for GitHub Actions"""
     try:
         # Headers specifically for JSON/API requests
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json, text/javascript, */*; q=0.01",
             "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://api.bedbathandbeyond.com/",
+            "Referer": "https://www.bedbathandbeyond.com/",
             "X-Requested-With": "XMLHttpRequest",
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Site": "same-site",
         }
         
-        r = session.get(url, headers=headers, timeout=15, verify=True)
+        # Increased timeout for GitHub Actions (network may be slower)
+        # Using connect timeout of 10s and read timeout of 30s
+        r = session.get(url, headers=headers, timeout=(10, 30), verify=False)
+        
         if r.status_code == 200:
-            return r.json()
-        else:
-            logger.warning(f"JSON fetch failed: {r.status_code} for {url}", "WARNING")
+            try:
+                return r.json()
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON decode error for {url}: {e}")
+                # Try to get text response for debugging
+                logger.debug(f"Response text: {r.text[:500]}")
+                return None
+        elif r.status_code == 404:
+            logger.warning(f"404 Not Found for {url}")
             return None
-    except json.JSONDecodeError as e:
-        logger.warning(f"JSON decode error for {url}: {e}", "ERROR")
-        return None
+        elif r.status_code == 429:  # Rate limited
+            logger.warning(f"Rate limited (429) for {url}, waiting 15 seconds")
+            time.sleep(15)
+            raise requests.exceptions.RetryError("Rate limited")
+        elif r.status_code == 403:
+            logger.warning(f"Access forbidden (403) for {url}")
+            return None
+        elif r.status_code >= 500:
+            logger.warning(f"Server error {r.status_code} for {url}")
+            time.sleep(3)
+            raise requests.exceptions.RetryError(f"Server error {r.status_code}")
+        else:
+            logger.warning(f"HTTP {r.status_code} for {url}")
+            return None
+            
+    except requests.exceptions.Timeout as e:
+        logger.warning(f"Timeout for {url}: {e}")
+        raise  # This will trigger retry
+    except requests.exceptions.ConnectionError as e:
+        logger.warning(f"Connection error for {url}: {e}")
+        raise  # This will trigger retry
+    except requests.exceptions.ReadTimeout as e:
+        logger.warning(f"Read timeout for {url}: {e}")
+        raise  # This will trigger retry
     except Exception as e:
-        logger.warning(f"Error fetching JSON from {url}: {e}", "ERROR")
+        logger.error(f"Error fetching JSON from {url}: {type(e).__name__}: {str(e)[:200]}")
         return None
 
 # ================= DATA PROCESSING =================
@@ -252,7 +230,7 @@ def extract_bbb_data(variant_data: dict) -> Dict[str, Any]:
         logger.error(f"Error extracting BBB data: {e}")
         return {}
 
-def process_variant_data(variant_id: str, session, stats: dict, request_delay: float = 1.0) -> Dict[str, Any]:
+def process_variant_data(variant_id: str, stats: dict, request_delay: float = 1.0) -> Dict[str, Any]:
     """Process a single BBB variant ID"""
     try:
         if not variant_id or pd.isna(variant_id):
@@ -269,7 +247,7 @@ def process_variant_data(variant_id: str, session, stats: dict, request_delay: f
             stats['invalid'] += 1
             return None
         
-        logger.debug(f"Processing variant ID: {variant_id}")
+        logger.info(f"Processing variant ID: {variant_id}")
         
         # Try different API endpoints in order
         api_endpoints = [
@@ -283,8 +261,10 @@ def process_variant_data(variant_id: str, session, stats: dict, request_delay: f
             logger.debug(f"Trying API endpoint: {api_url}")
             data = fetch_json(api_url)
             if data:
+                logger.debug(f"Successfully fetched data for variant {variant_id}")
                 break
-            time.sleep(0.5)  # Small delay between endpoint attempts
+            # Small delay between endpoint attempts
+            time.sleep(0.5)
         
         if not data:
             logger.warning(f"No data found for variant {variant_id}")
@@ -328,10 +308,12 @@ def process_variant_data(variant_id: str, session, stats: dict, request_delay: f
         }
         
         stats['processed'] += 1
-        logger.info(f"Processed variant {variant_id}: SKU={variant_info.get('BBB_SKU', 'N/A')}")
+        sku = variant_info.get('BBB_SKU', 'N/A')
+        logger.info(f"Processed variant {variant_id}: SKU={sku}")
         
         # Respect request delay (increased for rate limiting)
-        time.sleep(request_delay)
+        if request_delay > 0:
+            time.sleep(request_delay)
         
         return result
         
@@ -350,7 +332,7 @@ def process_variant_data(variant_id: str, session, stats: dict, request_delay: f
             'BBB_AttributeIcons_Count': '',
             'BBB_AttributeIcons_URLs': '',
             'BBB_AttributeIcons_Names': '',
-            'BBB_Error': str(e),
+            'BBB_Error': str(e)[:500],  # Limit error message length
             'BBB_API_Response': ''
         }
 
@@ -366,8 +348,8 @@ def main():
                        help='BBB API base URL (default: https://api.bedbathandbeyond.com/options)')
     parser.add_argument('--output-dir', type=str, default='output', help='Output directory')
     parser.add_argument('--max-workers', type=int, default=2, help='Maximum concurrent requests (reduced for rate limiting)')
-    parser.add_argument('--request-delay', type=float, default=1.0, help='Delay between requests in seconds (increased for rate limiting)')
-    parser.add_argument('--timeout', type=int, default=15, help='Request timeout in seconds')
+    parser.add_argument('--request-delay', type=float, default=2.0, help='Delay between requests in seconds (increased for rate limiting)')
+    parser.add_argument('--timeout', type=int, default=30, help='Request timeout in seconds')
     
     args = parser.parse_args()
     
@@ -500,9 +482,6 @@ def main():
     if len(variant_ids) > 0:
         logger.info(f"Sample variant IDs: {variant_ids[:10]}")
     
-    # Create session
-    session = create_session()
-    
     # Initialize statistics
     stats = {
         'processed': 0,
@@ -515,45 +494,64 @@ def main():
     results = []
     processed_ids = set()
     
-    # Use a simpler approach with smaller batches
-    batch_size = min(50, args.max_workers * 10)
-    for i in range(0, len(variant_ids), batch_size):
-        batch = variant_ids[i:i + batch_size]
-        logger.info(f"Processing batch {i//batch_size + 1}/{(len(variant_ids) + batch_size - 1)//batch_size} ({len(batch)} IDs)")
-        
-        with ThreadPoolExecutor(max_workers=min(args.max_workers, len(batch))) as executor:
-            futures = []
-            for variant_id in batch:
-                if variant_id in processed_ids:
-                    continue
-                    
-                future = executor.submit(
-                    process_variant_data, 
-                    variant_id, 
-                    session, 
-                    stats, 
-                    args.request_delay
-                )
-                futures.append(future)
-                processed_ids.add(variant_id)
-            
-            # Collect results
-            for future in as_completed(futures):
-                try:
-                    result = future.result()
-                    if result:
-                        results.append(result)
-                except Exception as e:
-                    logger.error(f"Error in thread execution: {e}")
-                    stats['errors'] += 1
-        
-        # Small delay between batches
-        if i + batch_size < len(variant_ids):
-            logger.info(f"Batch completed, pausing for 5 seconds...")
-            time.sleep(5)
+    # Use sequential processing instead of ThreadPoolExecutor for better reliability
+    logger.info(f"Processing {len(variant_ids)} variant IDs sequentially to avoid rate limiting")
     
-    # Close session
-    session.close()
+    for i, variant_id in enumerate(variant_ids, 1):
+        if variant_id in processed_ids:
+            continue
+            
+        logger.info(f"Processing {i}/{len(variant_ids)}: variant {variant_id}")
+        
+        try:
+            result = process_variant_data(variant_id, stats, args.request_delay)
+            if result:
+                results.append(result)
+                processed_ids.add(variant_id)
+        except Exception as e:
+            logger.error(f"Unexpected error processing variant {variant_id}: {e}")
+            stats['errors'] += 1
+        
+        # Progress update every 10 items
+        if i % 10 == 0:
+            logger.info(f"Progress: {i}/{len(variant_ids)} completed")
+    
+    # Alternative: Use ThreadPoolExecutor with very conservative settings
+    # if you want to keep parallel processing
+    # batch_size = min(10, args.max_workers)
+    # for i in range(0, len(variant_ids), batch_size):
+    #     batch = variant_ids[i:i + batch_size]
+    #     logger.info(f"Processing batch {i//batch_size + 1}/{(len(variant_ids) + batch_size - 1)//batch_size} ({len(batch)} IDs)")
+        
+    #     with ThreadPoolExecutor(max_workers=min(1, len(batch))) as executor:  # Only 1 worker
+    #         futures = []
+    #         for variant_id in batch:
+    #             if variant_id in processed_ids:
+    #                 continue
+                    
+    #             future = executor.submit(
+    #                 process_variant_data, 
+    #                 variant_id, 
+    #                 stats, 
+    #                 args.request_delay
+    #             )
+    #             futures.append(future)
+    #             processed_ids.add(variant_id)
+            
+    #         # Collect results
+    #         for future in as_completed(futures):
+    #             try:
+    #                 result = future.result()
+    #                 if result:
+    #                     results.append(result)
+    #             except Exception as e:
+    #                 logger.error(f"Error in thread execution: {e}")
+    #                 stats['errors'] += 1
+        
+    #     # Delay between batches
+    #     if i + batch_size < len(variant_ids):
+    #         logger.info(f"Batch completed, pausing for 3 seconds...")
+    #         time.sleep(3)
     
     # Create results DataFrame
     if results:
@@ -604,7 +602,7 @@ def main():
     
     # Save output
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = os.path.join(args.output_dir, f"bbb_output_chunk_{args.chunk_id}_{timestamp}.csv")
+    output_file = os.path.join(args.output_dir, f"bbb_output_chunk_{args.chunk_id}.csv")
     
     # Convert any non-string columns to string for CSV output
     for col in results_df.columns:
@@ -663,7 +661,10 @@ def main():
     logger.info(f"Summary saved to: {summary_file}")
     
     # Clean up
+    session.close()
     gc.collect()
+    
+    logger.info("BBB Extractor finished successfully")
 
 if __name__ == "__main__":
     # Install tenacity if not available
