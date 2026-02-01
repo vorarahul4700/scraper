@@ -150,8 +150,28 @@ def solve_recaptcha_audio(driver):
                 response_box = WebDriverWait(driver, 5).until(
                     EC.presence_of_element_located((By.ID, "audio-response"))
                 )
-                response_box.send_keys(captcha_text.lower())
-                time.sleep(1)
+                # response_box.send_keys(captcha_text.lower())
+
+                driver.switch_to.default_content()
+
+                # find correct iframe
+                for frame in driver.find_elements(By.CSS_SELECTOR, "iframe"):
+                    driver.switch_to.frame(frame)
+                    if driver.find_elements(By.ID, "audio-response"):
+                        break
+                    driver.switch_to.default_content()
+
+                response_box = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.ID, "audio-response"))
+                )
+
+                response_box.clear()
+                response_box.click()
+
+                for ch in captcha_text.lower():
+                    response_box.send_keys(ch)
+                    time.sleep(random.uniform(0.05, 0.15))
+
                 response_box.send_keys(Keys.ENTER)
                 time.sleep(random.uniform(2, 3))
             else:

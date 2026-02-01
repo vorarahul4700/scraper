@@ -55,9 +55,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             google-chrome-stable \
-            chromium-chromedriver \
             xvfb \
-            lftp
+            lftp \
+            ffmpeg
 
       - name: Install Python dependencies
         run: |
@@ -70,7 +70,9 @@ jobs:
             requests==2.31.0 \
             lxml==4.9.3 \
             fake-useragent==1.4.0 \
-            python-dateutil==2.8.2
+            python-dateutil==2.8.2 \
+            speechrecognition==3.10.1 \
+            pydub==0.25.1
 
       - name: Run scraper
         env:
