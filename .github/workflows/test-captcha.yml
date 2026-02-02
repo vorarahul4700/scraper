@@ -1,0 +1,188 @@
+name: Solve CAPTCHA
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'URL containing CAPTCHA'
+        required: true
+        default: 'https://www.google.com/recaptcha/api2/demo'
+      action_type:
+        description: 'Type of CAPTCHA solving to attempt'
+        required: false
+        default: 'auto_detect'
+        type: choice
+        options:
+          - auto_detect
+          - recaptcha
+          - math_only
+          - image_ocr
+      save_debug:
+        description: 'Save debug screenshots and logs'
+        required: false
+        default: true
+        type: boolean
+      timeout:
+        description: 'Timeout in seconds'
+        required: false
+        default: '30'
+        type: string
+
+env:
+  PYTHON_VERSION: '3.10'
+  LOG_DIR: 'captcha_logs'
+
+jobs:
+  setup-and-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          chromium-browser \
+          chromium-chromedriver \
+          tesseract-ocr \
+          libtesseract-dev \
+          wget \
+          unzip \
+          xvfb \
+          fonts-liberation \
+          libappindicator3-1 \
+          libasound2 \
+          libatk-bridge2.0-0 \
+          libatk1.0-0 \
+          libcups2 \
+          libdbus-1-3 \
+          libgdk-pixbuf2.0-0 \
+          libnspr4 \
+          libnss3 \
+          libx11-xcb1 \
+          libxcomposite1 \
+          libxdamage1 \
+          libxrandr2
+    
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install \
+          selenium==4.15.0 \
+          pillow==10.1.0 \
+          pytesseract==0.3.10 \
+          requests==2.31.0 \
+          webdriver-manager==4.0.1 \
+          python-dotenv==1.0.0
+    
+    - name: Create log directory
+      run: mkdir -p ${{ env.LOG_DIR }}
+    
+    - name: Run CAPTCHA solver
+      env:
+        TARGET_URL: ${{ github.event.inputs.target_url }}
+        ACTION_TYPE: ${{ github.event.inputs.action_type }}
+        SAVE_DEBUG: ${{ github.event.inputs.save_debug }}
+        TIMEOUT: ${{ github.event.inputs.timeout }}
+      run: |
+        echo "Starting CAPTCHA solver..."
+        echo "Target URL: $TARGET_URL"
+        echo "Action type: $ACTION_TYPE"
+        echo "Save debug: $SAVE_DEBUG"
+        echo "Timeout: $TIMEOUT seconds"
+        
+        python test.py \
+          --url "$TARGET_URL" \
+          --headless \
+          --log-dir "${{ env.LOG_DIR }}"
+    
+    - name: Save debug artifacts
+      if: ${{ github.event.inputs.save_debug == 'true' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: captcha-debug-info
+        path: |
+          ${{ env.LOG_DIR }}/
+        retention-days: 7
+    
+    - name: Generate summary report
+      if: always()
+      run: |
+        echo "## CAPTCHA Solver Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Target URL:** ${{ github.event.inputs.target_url }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Action Type:** ${{ github.event.inputs.action_type }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ -f "${{ env.LOG_DIR }}/initial_page.png" ]; then
+          echo "**Screenshots saved:** Yes" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "**Screenshots saved:** No" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "1. Check artifacts for debug information" >> $GITHUB_STEP_SUMMARY
+        echo "2. Review logs for any errors" >> $GITHUB_STEP_SUMMARY
+        echo "3. Modify solver for site-specific CAPTCHAs" >> $GITHUB_STEP_SUMMARY
+        echo "4. For complex CAPTCHAs, consider manual solving" >> $GITHUB_STEP_SUMMARY
+
+  test-basic-functionality:
+    runs-on: ubuntu-latest
+    needs: setup-and-run
+    if: always()
+    
+    steps:
+    - name: Run basic tests
+      run: |
+        echo "Testing basic CAPTCHA solving functionality..."
+        
+        # Create test script
+        cat > test_basic.py << 'EOF'
+from captcha_solver import SimpleCaptchaSolver
+
+def test_math_solving():
+    solver = SimpleCaptchaSolver()
+    
+    test_cases = [
+        ("2 + 3", "5"),
+        ("10 - 5", "5"),
+        ("4 * 6", "24"),
+        ("What is 8 + 9?", "17"),
+    ]
+    
+    print("Testing math CAPTCHA solving:")
+    for problem, expected in test_cases:
+        result = solver.solve_math_captcha(problem)
+        status = "✓" if result == expected else "✗"
+        print(f"  {status} {problem} -> {result} (expected: {expected})")
+    
+    solver.close()
+
+if __name__ == "__main__":
+    test_math_solving()
+EOF
+        
+        python test_basic.py
+
+  cleanup:
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Clean up
+      run: |
+        echo "Cleaning up temporary files..."
+        rm -rf __pycache__ || true
+        rm -rf *.pyc || true
+        echo "Cleanup completed"
