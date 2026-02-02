@@ -228,7 +228,6 @@ class EnhancedCaptchaSolver:
             
             audio_button.click()
             logger.info("Clicked audio button")
-            
             WebDriverWait(self.driver, 15).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "audio, .rc-audiochallenge-tdownload-link"))
             )
@@ -316,26 +315,25 @@ class EnhancedCaptchaSolver:
             traceback.print_exc()
             return {"success": False, "error": str(e)}
     
-    def _get_audio_source(self):
+    def _get_audio_source(self) -> Optional[str]:
+        """Extract audio source URL"""
         try:
-            wait = WebDriverWait(self.driver, 15)
-
-            # Wait until audio element exists
-            audio = wait.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "audio"))
-            )
-
-            # Wait until src attribute is populated
-            for _ in range(10):
-                src = audio.get_attribute("src")
-                if src and ".mp3" in src:
-                    return src
-                time.sleep(1)
-
+            # Try multiple methods to find audio source
+            methods = [
+                self._get_audio_by_tag,
+                self._get_audio_by_javascript,
+                self._get_audio_by_source_inspection
+            ]
+            
+            for method in methods:
+                audio_src = method()
+                if audio_src:
+                    return audio_src
+            
             return None
-
+            
         except Exception as e:
-            logger.error(f"Audio source wait failed: {e}")
+            logger.error(f"Error getting audio source: {e}")
             return None
     
     def _get_audio_by_tag(self) -> Optional[str]:
