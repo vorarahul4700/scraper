@@ -95,20 +95,38 @@ def detects_recaptcha(driver):
         print(f"Error detecting reCAPTCHA: {e}")
         return False
 
+# In your main gscrapperci.py, update the handle_captcha function:
+
 def handle_captcha(driver, url):
-    """Handle captcha if detected"""
-    recaptcha = detects_recaptcha(driver)
-    if recaptcha:
-        print("Attempting to solve captcha...")
-        result = solve_recaptcha_audio(driver)
-        if result == "solved":
-            print("Captcha solved successfully!")
-            driver.switch_to.default_content()
-            return "solved"
+    """Handle captcha if detected with retry logic"""
+    max_retries = 3
+
+    for attempt in range(max_retries):
+        recaptcha = detects_recaptcha(driver)
+        if recaptcha:
+            print(f"Attempt {attempt + 1}/{max_retries} to solve captcha...")
+            result = solve_recaptcha_audio(driver)
+            
+            if result == "solved":
+                print("Captcha solved successfully!")
+                driver.switch_to.default_content()
+                return "solved"
+            else:
+                print(f"Captcha solving attempt {attempt + 1} failed")
+                
+                if attempt < max_retries - 1:
+                    # Try refreshing the page
+                    print("Refreshing page and retrying...")
+                    driver.refresh()
+                    time.sleep(5)
+                else:
+                    print("All captcha solving attempts failed")
+                    return "failed"
         else:
-            print(f"Captcha solving failed: {result}")
-            return "failed"
-    return "no_captcha"
+            print("No reCAPTCHA found.")
+            return "no_captcha"
+    
+    return "failed"
 
 def start_new_driver(search_url):
     """Start a new driver and handle captcha if present"""
