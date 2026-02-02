@@ -172,7 +172,7 @@ def process_variant_data(variant_id: str, stats: dict, request_delay: float = 1.
             data = fetch_json(api_url)
             if data:
                 break
-            time.sleep(0.5)  # Small delay between endpoint attempts
+            # time.sleep(0.5)  # Small delay between endpoint attempts
         
         if not data:
             logger.warning(f"No data found for variant {variant_id}")
@@ -219,7 +219,7 @@ def process_variant_data(variant_id: str, stats: dict, request_delay: float = 1.
         logger.info(f"Processed variant {variant_id}: SKU={variant_info.get('BBB_SKU', 'N/A')}")
         
         # Respect request delay (increased for rate limiting)
-        time.sleep(request_delay)
+        # time.sleep(request_delay)
         
         return result
         
@@ -436,8 +436,8 @@ def main():
         
         # Small delay between batches
         if i + batch_size < len(variant_ids):
-            logger.info(f"Batch completed, pausing for 5 seconds...")
-            time.sleep(5)
+            logger.info(f"Batch completed")
+            # time.sleep(5)
     
     # Close session
     # session.close()
