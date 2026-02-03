@@ -143,6 +143,9 @@ def fetch_json(url: str) -> Optional[dict]:
         else:
             print("No dataLayer found")
             return None
+    except Exception as e:
+        print(f"Error fetching JSON: {e}")
+        return None
 
 # ================= SITEMAP PROCESSING =================
 
