@@ -7,6 +7,8 @@ import threading
 import requests
 import re
 import json
+import html
+import ast
 from typing import Optional, List, Dict
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
@@ -111,6 +113,43 @@ def http_get(url: str, is_json: bool = False) -> Optional[str]:
             time.sleep(1)
     return None
 
+
+def _clean_strings(obj):
+    """Recursively clean JSON-escaped strings like \\/"""
+    if isinstance(obj, dict):
+        return {k: _clean_strings(v) for k, v in obj.items()}
+
+    if isinstance(obj, list):
+        return [_clean_strings(v) for v in obj]
+
+    if isinstance(obj, str):
+        # JSON escape cleanup (safe + no warnings)
+        return obj.replace('\\/', '/')
+
+    return obj
+
+
+def extract_datalayer(html_text):
+    match = re.search(r'dataLayer\s*=\s*(\[[\s\S]*?\]);', html_text)
+    if not match:
+        return None
+
+    raw = html.unescape(match.group(1))
+
+    # JS → Python literal compatibility
+    raw = raw.replace(':true', ':True') \
+             .replace(':false', ':False') \
+             .replace(':null', ':None')
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = ast.literal_eval(raw)
+
+    # 🔥 Clean ALL strings at source
+    return _clean_strings(data)
+
+
 def fetch_json(url: str) -> Optional[dict]:
     """Fetch JSON data with proper headers"""
     try:
@@ -121,23 +160,12 @@ def fetch_json(url: str) -> Optional[dict]:
         response = requests.get(url, headers=headers)
         # Look for dataLayer
         html = response.text
-        pattern = r'dataLayer\s*=\s*(\[.*?\]);'
-        match = re.search(pattern, html, re.DOTALL)
-
-        if match:
-            data_str = match.group(1)
-            data_str = data_str.replace("'", '"')
-            
-            try:
-                data_layer = json.loads(data_str)
-                if isinstance(data_layer, list) and data_layer:
-                    product_data = data_layer[0]
-                    return product_data
-            except Exception as e:
-                print(f"Error parsing JSON: {e}")
-        else:
+        data_layer = extract_datalayer(html)
+        if not data_layer:
             print("No dataLayer found")
-            return None
+            return
+        product_data = data_layer[0]
+        return product_data
     except Exception as e:
         print(f"Error fetching JSON: {e}")
         return None
