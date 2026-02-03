@@ -56,12 +56,7 @@ def get_sitemap_from_robots_txt():
         # Fetch the robots.txt content
         response = requests.get(robots_url, timeout=10)
         response.raise_for_status()
-        
-        # Print the entire robots.txt content
-        print("=== robots.txt Content ===")
-        print(response.text)
-        print("=========================\n")
-        
+     
         # Extract Sitemap URL
         sitemap_url = None
         for line in response.text.split('\n'):
@@ -324,7 +319,7 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict):
     try:
         # Prepare row data
         row = [
-            product_url + "?option=" + str(product_info['variation_id']),
+            product_url,
             product_info['product_id'],  # Ref Product ID
             product_info['variation_id'],  # Ref Varient ID
             product_info['category'],  # Ref Category
