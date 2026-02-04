@@ -197,59 +197,80 @@ def normalize_image_url(url: str) -> str:
 from typing import Dict
 
 def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
-    """
-    Extract data from Overstock product API response for all variations
-    Returns a list of product data dictionaries (one per variation)
-    """
     try:
+        if not product_data or not isinstance(product_data, dict):
+            log(f"Invalid product_data: {type(product_data)}", "ERROR")
+            return []
+
         product = product_data  # API already returns product root
         
+        # Safe getter function with fallback
+        def safe_get(data, keys, default=''):
+            if not data:
+                return default
+            for key in keys if isinstance(keys, list) else [keys]:
+                if isinstance(data, dict):
+                    data = data.get(key)
+                else:
+                    return default
+                if data is None:
+                    return default
+            return data or default
+        
         # ---------- Common data ----------
-        product_id = str(product.get('productId', ''))
-        name = product.get('name', '').strip()
+        product_id = str(safe_get(product, 'productId', ''))
+        name = str(safe_get(product, 'name', '')).strip()
 
-        brand_obj = product.get('brand', {})
-        brand = brand_obj.get('name', '') if isinstance(brand_obj, dict) else str(brand_obj)
+        brand_obj = safe_get(product, 'brand', {})
+        brand = safe_get(brand_obj, 'name', '') if isinstance(brand_obj, dict) else str(brand_obj)
 
         # ---------- SKU / MPN ----------
-        details = product.get('details', {})
-        sku = details.get('sku', '')
+        details = safe_get(product, 'details', {})
+        sku = safe_get(details, 'sku', '')
 
-        specs = product.get('specifications', {})
-        group_attr_1 = specs.get('Color', [''])[0] if specs.get('Color') else ''
-        mpn = specs.get('Model Number', [''])[0] if specs.get('Model Number') else ''
+        specs = safe_get(product, 'specifications', {})
+        group_attr_1 = safe_get(specs, ['Color', 0], '') if isinstance(specs.get('Color'), list) else ''
+        mpn = safe_get(specs, ['Model Number', 0], '') if isinstance(specs.get('Model Number'), list) else ''
 
         # ---------- Category ----------
-        breadcrumbs = product.get('breadcrumbs', [])
+        breadcrumbs = safe_get(product, 'breadcrumbs', [])
         category = ''
         category_url = ''
 
-        if breadcrumbs:
+        if breadcrumbs and isinstance(breadcrumbs, list) and len(breadcrumbs) > 0:
             last = breadcrumbs[-1]
-            category = last.get('label', '')
-            url = last.get('url', '')
-            last_url = url.lstrip('/') if url else ''
-            category_url = f"{CURR_URL}/{last_url}" if last_url else ''
+            if isinstance(last, dict):
+                category = safe_get(last, 'label', '')
+                url = safe_get(last, 'url', '')
+                last_url = url.lstrip('/') if url else ''
+                category_url = f"{CURR_URL}/{last_url}" if last_url else ''
 
         # ---------- Images ----------
-        images = product.get('images', [])
-        image_data = product.get('imageData', {})
-        main_image = (
-            images[0].get('url', '') if images 
-            else image_data.get('productImageUrl', '')
-        )
-
+        images = safe_get(product, 'images', [])
+        image_data = safe_get(product, 'imageData', {})
+        
+        main_image = ''
+        if images and isinstance(images, list) and len(images) > 0:
+            first_image = images[0]
+            if isinstance(first_image, dict):
+                main_image = safe_get(first_image, 'url', '')
+        if not main_image:
+            main_image = safe_get(image_data, 'productImageUrl', '')
+        
         all_products = []
         
         # ---------- Check for multiple variations ----------
-        multiple_variations = product.get('multipleInStockVariations', False)
-        variations = product.get('variations', [])
+        multiple_variations = safe_get(product, 'multipleInStockVariations', False)
+        variations = safe_get(product, 'variations', [])
         
-        if multiple_variations and len(variations) > 1:
+        if multiple_variations and isinstance(variations, list) and len(variations) > 1:
             # Process each variation
             for variation in variations:
-                variation_id = variation.get('variationId', '')
-                full_sku = variation.get('fullSku', '')
+                if not isinstance(variation, dict):
+                    continue
+                    
+                variation_id = safe_get(variation, 'variationId', '')
+                full_sku = safe_get(variation, 'fullSku', '')
                 
                 # Create variation-specific URL
                 if variation_id:
@@ -258,39 +279,57 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
                     variation_url = product_url
                 
                 # ---------- Price ----------
-                prices = variation.get('prices', {})
-                price = (
-                    prices.get('salePrice', {}).get('amount', 
-                    prices.get('basePrice', {}).get('amount', 
-                    product.get('selectedPrice', {}).get('amount', '')))
-                )
+                prices = safe_get(variation, 'prices', {})
+                price = ''
                 
-
-                variant_name = variation.get('name', {})
+                # Try salePrice first, then basePrice, then product selectedPrice
+                if isinstance(prices, dict):
+                    sale_price = safe_get(prices, ['salePrice', 'amount'], '')
+                    if sale_price:
+                        price = sale_price
+                    else:
+                        base_price = safe_get(prices, ['basePrice', 'amount'], '')
+                        if base_price:
+                            price = base_price
+                
+                if not price:
+                    selected_price = safe_get(product, ['selectedPrice', 'amount'], '')
+                    if selected_price:
+                        price = selected_price
+                
+                variant_name = safe_get(variation, 'name', '')
                 if variant_name:
                     name = variant_name
 
-                
-                variant_image = variation.get('imageUrl', {})
+                variant_image = safe_get(variation, 'imageUrl', '')
                 if variant_image:
                     main_image = variant_image
+                    
                 # ---------- Quantity & Status ----------
-                quantity = variation.get('quantityAvailable', '')
+                quantity = safe_get(variation, 'quantityAvailable', '')
                 
                 # Check both possible status fields
-                status_value = variation.get('status', '')
-                sellable_status = variation.get('sellableStatus', '')
+                status_value = safe_get(variation, 'status', '')
+                sellable_status = safe_get(variation, 'sellableStatus', '')
                 if status_value == 'SELLABLE' or sellable_status == 'SELLABLE':
                     status = 'In Stock'
                 else:
                     status = 'Out of Stock'
                 
                 # ---------- Group Attributes ----------
-                group_attr_1 = variation.get('description', specs.get('Color', [''])[0] if specs.get('Color') else '')
-                group_attr_2 = (
-                    specs.get('Material', [''])[0] if specs.get('Material') else 
-                    specs.get('Top Material', [''])[0] if specs.get('Top Material') else ''
-                )
+                variation_desc = safe_get(variation, 'description', '')
+                if variation_desc:
+                    group_attr_1 = variation_desc
+                elif isinstance(specs.get('Color'), list) and len(specs['Color']) > 0:
+                    group_attr_1 = specs['Color'][0]
+                else:
+                    group_attr_1 = ''
+                    
+                group_attr_2 = ''
+                if isinstance(specs.get('Material'), list) and len(specs['Material']) > 0:
+                    group_attr_2 = specs['Material'][0]
+                elif isinstance(specs.get('Top Material'), list) and len(specs['Top Material']) > 0:
+                    group_attr_2 = specs['Top Material'][0]
                 
                 product_info = {
                     'product_id': product_id,
@@ -298,7 +337,7 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
                     'brand': brand,
                     'price': price,
                     'main_image': main_image,
-                    'sku': full_sku,  # Use variation SKU
+                    'sku': full_sku if full_sku else sku,
                     'mpn': mpn,
                     'category': category,
                     'category_url': category_url,
@@ -312,53 +351,76 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
                 
                 all_products.append(product_info)
             
-            return all_products
+            return all_products if all_products else []
             
         else:
             # Single product or no variations
-            if variations:
+            variation_id = ''
+            quantity = ''
+            status = 'Out of Stock'
+            group_attr_1_current = group_attr_1
+            
+            # Get data from first variation if exists
+            if isinstance(variations, list) and len(variations) > 0:
                 first_variation = variations[0]
-                variation_id = first_variation.get('variationId', '')
-                quantity = first_variation.get('quantityAvailable', '')
-                group_attr_1 = first_variation.get('description', '')
-                
-                # Get price from variation if available
-                prices = first_variation.get('prices', {})
-                price = (
-                    prices.get('salePrice', {}).get('amount', 
-                    prices.get('basePrice', {}).get('amount', 
-                    product.get('selectedPrice', {}).get('amount', '')))
-                )
-                
-                # Check status
-                status_value = first_variation.get('status', '')
-                sellable_status = first_variation.get('sellableStatus', '')
-                if status_value == 'SELLABLE' or sellable_status == 'SELLABLE':
-                    status = 'In Stock'
-                else:
-                    status = 'Out of Stock'
-
-                if variation_id:
-                    variation_url = f"{product_url}?option={variation_id}"
-                    product_url = variation_url
+                if isinstance(first_variation, dict):
+                    variation_id = safe_get(first_variation, 'variationId', '')
+                    quantity = safe_get(first_variation, 'quantityAvailable', '')
+                    variation_desc = safe_get(first_variation, 'description', '')
+                    if variation_desc:
+                        group_attr_1_current = variation_desc
                     
-            else:
-                # No variations at all
-                variation_id = ''
-                quantity = ''
-                price = product.get('selectedPrice', {}).get('amount', '')
+                    # Get price from variation if available
+                    prices = safe_get(first_variation, 'prices', {})
+                    price = ''
+                    if isinstance(prices, dict):
+                        sale_price = safe_get(prices, ['salePrice', 'amount'], '')
+                        if sale_price:
+                            price = sale_price
+                        else:
+                            base_price = safe_get(prices, ['basePrice', 'amount'], '')
+                            if base_price:
+                                price = base_price
+                    
+                    # Check status
+                    status_value = safe_get(first_variation, 'status', '')
+                    sellable_status = safe_get(first_variation, 'sellableStatus', '')
+                    if status_value == 'SELLABLE' or sellable_status == 'SELLABLE':
+                        status = 'In Stock'
+                    else:
+                        status = 'Out of Stock'
+
+                    if variation_id:
+                        product_url = f"{product_url}?option={variation_id}"
+            
+            # If price not found in variation, try product level
+            if not price:
+                selected_price = safe_get(product, ['selectedPrice', 'amount'], '')
+                if selected_price:
+                    price = selected_price
+                else:
+                    # Try lowestVariationPrice as fallback
+                    lowest_price = safe_get(product, ['lowestVariationPrice', 'amount'], '')
+                    if lowest_price:
+                        price = lowest_price
+            
+            # If no variations, check product-level stock
+            if not variation_id:
+                in_stock = safe_get(product, 'inStock', False)
+                is_sellable = safe_get(product, 'isSellable', False)
+                sellable_status = safe_get(product, 'sellableStatus', '')
                 
-                # Check product-level stock
-                if product.get('inStock', False):
+                if in_stock or is_sellable or sellable_status == 'SELLABLE':
                     status = 'In Stock'
                 else:
                     status = 'Out of Stock'
             
             # ---------- Group Attributes ----------
-            group_attr_2 = (
-                specs.get('Material', [''])[0] if specs.get('Material') else 
-                specs.get('Top Material', [''])[0] if specs.get('Top Material') else ''
-            )
+            group_attr_2 = ''
+            if isinstance(specs.get('Material'), list) and len(specs['Material']) > 0:
+                group_attr_2 = specs['Material'][0]
+            elif isinstance(specs.get('Top Material'), list) and len(specs['Top Material']) > 0:
+                group_attr_2 = specs['Top Material'][0]
             
             product_info = {
                 'product_id': product_id,
@@ -366,14 +428,14 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
                 'brand': brand,
                 'price': price,
                 'main_image': main_image,
-                'sku': sku,  # Use product SKU
+                'sku': sku,
                 'mpn': mpn,
                 'category': category,
                 'category_url': category_url,
                 'quantity': quantity,
                 'status': status,
                 'variation_id': variation_id,
-                'group_attr_1': group_attr_1,
+                'group_attr_1': group_attr_1_current,
                 'group_attr_2': group_attr_2,
                 'product_url': product_url
             }
@@ -381,8 +443,9 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
             return [product_info]
 
     except Exception as e:
-        log(f"Error extracting Overstock data: {e}", "ERROR")
+        log(f"Error extracting Overstock data: {str(e)} - Product data: {product_data.get('productId', 'Unknown') if isinstance(product_data, dict) else 'Invalid'}", "ERROR")
         return []
+
 
 def process_product_data(product_url: str, writer, seen: set, stats: dict):
     """Process a single Overstock product URL - handles multiple variations"""
