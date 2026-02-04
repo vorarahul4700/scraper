@@ -196,15 +196,15 @@ def normalize_image_url(url: str) -> str:
 
 from typing import Dict
 
-def extract_overstock_data(product_data: dict) -> Dict:
+def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
     """
-    Extract data from Overstock product API response
-    (schema-aligned to current Overstock JSON)
+    Extract data from Overstock product API response for all variations
+    Returns a list of product data dictionaries (one per variation)
     """
     try:
         product = product_data  # API already returns product root
-
-        # ---------- Basic ----------
+        
+        # ---------- Common data ----------
         product_id = str(product.get('productId', ''))
         name = product.get('name', '').strip()
 
@@ -216,7 +216,8 @@ def extract_overstock_data(product_data: dict) -> Dict:
         sku = details.get('sku', '')
 
         specs = product.get('specifications', {})
-        mpn = specs.get('Model Number', [''])[0]
+        group_attr_1 = specs.get('Color', [''])[0] if specs.get('Color') else ''
+        mpn = specs.get('Model Number', [''])[0] if specs.get('Model Number') else ''
 
         # ---------- Category ----------
         breadcrumbs = product.get('breadcrumbs', [])
@@ -227,76 +228,164 @@ def extract_overstock_data(product_data: dict) -> Dict:
             last = breadcrumbs[-1]
             category = last.get('label', '')
             url = last.get('url', '')
-            category_url = f"{CURR_URL}{url}" if url.startswith('/') else url
+            last_url = url.lstrip('/') if url else ''
+            category_url = f"{CURR_URL}/{last_url}" if last_url else ''
 
         # ---------- Images ----------
+        images = product.get('images', [])
         image_data = product.get('imageData', {})
-        main_image = image_data.get('productImageUrl', '')
+        main_image = (
+            images[0].get('url', '') if images 
+            else image_data.get('productImageUrl', '')
+        )
 
-        # ---------- Variations (pick first SELLABLE) ----------
+        all_products = []
+        
+        # ---------- Check for multiple variations ----------
+        multiple_variations = product.get('multipleInStockVariations', False)
         variations = product.get('variations', [])
+        
+        if multiple_variations and len(variations) > 1:
+            # Process each variation
+            for variation in variations:
+                variation_id = variation.get('variationId', '')
+                full_sku = variation.get('fullSku', '')
+                
+                # Create variation-specific URL
+                if variation_id:
+                    variation_url = f"{product_url}?option={variation_id}"
+                else:
+                    variation_url = product_url
+                
+                # ---------- Price ----------
+                prices = variation.get('prices', {})
+                price = (
+                    prices.get('salePrice', {}).get('amount', 
+                    prices.get('basePrice', {}).get('amount', 
+                    product.get('selectedPrice', {}).get('amount', '')))
+                )
+                
 
-        variation_id = ''
-        quantity = 0
-        status = 'OUT_OF_STOCK'
-        price = ''
-        group_attr_1 = ''
-        group_attr_2 = ''
+                variant_name = variation.get('name', {})
+                if variant_name
+                    name = variant_name
 
-        selected_variation = None
-        for v in variations:
-            if v.get('status') == 'SELLABLE':
-                selected_variation = v
-                break
+                
+                variant_image = variation.get('imageUrl', {})
+                if variant_image
+                    main_image = variant_image
+                # ---------- Quantity & Status ----------
+                quantity = variation.get('quantityAvailable', '')
+                
+                # Check both possible status fields
+                status_value = variation.get('status', '')
+                sellable_status = variation.get('sellableStatus', '')
+                if status_value == 'SELLABLE' or sellable_status == 'SELLABLE':
+                    status = 'In Stock'
+                else:
+                    status = 'Out of Stock'
+                
+                # ---------- Group Attributes ----------
+                group_attr_1 = variation.get('description', specs.get('Color', [''])[0] if specs.get('Color') else '')
+                group_attr_2 = (
+                    specs.get('Material', [''])[0] if specs.get('Material') else 
+                    specs.get('Top Material', [''])[0] if specs.get('Top Material') else ''
+                )
+                
+                product_info = {
+                    'product_id': product_id,
+                    'name': name,
+                    'brand': brand,
+                    'price': price,
+                    'main_image': main_image,
+                    'sku': full_sku,  # Use variation SKU
+                    'mpn': mpn,
+                    'category': category,
+                    'category_url': category_url,
+                    'quantity': quantity,
+                    'status': status,
+                    'variation_id': variation_id,
+                    'group_attr_1': group_attr_1,
+                    'group_attr_2': group_attr_2,
+                    'product_url': variation_url
+                }
+                
+                all_products.append(product_info)
+            
+            return all_products
+            
+        else:
+            # Single product or no variations
+            if variations:
+                first_variation = variations[0]
+                variation_id = first_variation.get('variationId', '')
+                quantity = first_variation.get('quantityAvailable', '')
+                group_attr_1 = first_variation.get('description', '')
+                
+                # Get price from variation if available
+                prices = first_variation.get('prices', {})
+                price = (
+                    prices.get('salePrice', {}).get('amount', 
+                    prices.get('basePrice', {}).get('amount', 
+                    product.get('selectedPrice', {}).get('amount', '')))
+                )
+                
+                # Check status
+                status_value = first_variation.get('status', '')
+                sellable_status = first_variation.get('sellableStatus', '')
+                if status_value == 'SELLABLE' or sellable_status == 'SELLABLE':
+                    status = 'In Stock'
+                else:
+                    status = 'Out of Stock'
 
-        if not selected_variation and variations:
-            selected_variation = variations[0]
-
-        if selected_variation:
-            variation_id = selected_variation.get('variationId')
-
-            inventory = selected_variation.get('inventory', {})
-            quantity = inventory.get('quantityAvailable', 0)
-
-            status = selected_variation.get('status', '')
-
-            prices = selected_variation.get('prices', {})
-            sale = prices.get('salePrice', {})
-            base = prices.get('basePrice', {})
-
-            price = (
-                sale.get('amount')
-                or base.get('amount')
-                or ''
+                if variation_id:
+                    variation_url = f"{product_url}?option={variation_id}"
+                    product_url = variation_url
+                    
+            else:
+                # No variations at all
+                variation_id = ''
+                quantity = ''
+                price = product.get('selectedPrice', {}).get('amount', '')
+                
+                # Check product-level stock
+                if product.get('inStock', False):
+                    status = 'In Stock'
+                else:
+                    status = 'Out of Stock'
+            
+            # ---------- Group Attributes ----------
+            group_attr_2 = (
+                specs.get('Material', [''])[0] if specs.get('Material') else 
+                specs.get('Top Material', [''])[0] if specs.get('Top Material') else ''
             )
-
-            # Variation name usually carries size
-            group_attr_1 = selected_variation.get('description', '')
-            group_attr_2 = selected_variation.get('fullSku', '')
-
-        return {
-            'product_id': product_id,
-            'name': name,
-            'brand': brand,
-            'price': price,
-            'main_image': main_image,
-            'sku': sku,
-            'mpn': mpn,
-            'category': category,
-            'category_url': category_url,
-            'quantity': quantity,
-            'status': status,
-            'variation_id': variation_id,
-            'group_attr_1': group_attr_1,
-            'group_attr_2': group_attr_2
-        }
+            
+            product_info = {
+                'product_id': product_id,
+                'name': name,
+                'brand': brand,
+                'price': price,
+                'main_image': main_image,
+                'sku': sku,  # Use product SKU
+                'mpn': mpn,
+                'category': category,
+                'category_url': category_url,
+                'quantity': quantity,
+                'status': status,
+                'variation_id': variation_id,
+                'group_attr_1': group_attr_1,
+                'group_attr_2': group_attr_2,
+                'product_url': product_url
+            }
+            
+            return [product_info]
 
     except Exception as e:
         log(f"Error extracting Overstock data: {e}", "ERROR")
-        return {}
+        return []
 
 def process_product_data(product_url: str, writer, seen: set, stats: dict):
-    """Process a single Overstock product URL"""
+    """Process a single Overstock product URL - handles multiple variations"""
     if product_url in seen:
         return
     seen.add(product_url)
@@ -310,12 +399,8 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict):
         log(f"No product ID found for URL: {product_url}", "ERROR")
         return
     
-    # Fetch product data from API - Overstock may have different endpoints
-    # Try multiple possible API endpoints
     api_endpoints = [
         f"https://www.overstock.com/api/product/{product_id}",
-        # f"https://www.overstock.com/api/products/{product_id}",
-        # f"https://www.overstock.com/api/catalog/product/{product_id}",
     ]
     
     data = None
@@ -345,44 +430,54 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict):
         log(f"No data found for product {product_id}", "ERROR")
         return
     
-    # Extract data from response
-    product_info = extract_overstock_data(data)
-    if not product_info.get('product_id'):
+    # Extract data from response - now returns a list of variations
+    products_list = extract_overstock_data(data, product_url)
+    
+    if not products_list:
         stats['errors'] += 1
-        log(f"Invalid data for product {product_id}", "ERROR")
+        log(f"No variations found for product {product_id}", "ERROR")
         return
     
-    try:
-        # Prepare row data
-        row = [
-            product_url + "?option=" + str(product_info['variation_id']),
-            product_info['product_id'],  # Ref Product ID
-            product_info['variation_id'],  # Ref Varient ID
-            product_info['category'],  # Ref Category
-            product_info['category_url'],  # Ref Category URL
-            product_info['brand'],  # Ref Brand Name
-            product_info['name'],  # Ref Product Name
-            product_info['sku'],  # Ref SKU
-            product_info['mpn'],  # Ref MPN
-            '',  # Ref GTIN (empty for now)
-            product_info['price'],  # Ref Price
-            normalize_image_url(product_info['main_image']),  # Ref Main Image
-            product_info['quantity'],  # Ref Quantity
-            product_info['group_attr_1'],  # Ref Group Attr 1
-            product_info['group_attr_2'],  # Ref Group Attr 2
-            product_info['status'],  # Ref Status
-            SCRAPED_DATE  # Date Scrapped
-        ]
+    
+    
+    for product_info in products_list:
+        if not product_info.get('product_id'):
+            continue
+            
+        try:
+            # Prepare row data for each variation
+            row = [
+                product_info['product_url'],  # Variation-specific URL
+                product_info['product_id'],  # Ref Product ID
+                product_info['variation_id'],  # Ref Varient ID
+                product_info['category'],  # Ref Category
+                product_info['category_url'],  # Ref Category URL
+                product_info['brand'],  # Ref Brand Name
+                product_info['name'],  # Ref Product Name
+                product_info['sku'],  # Ref SKU
+                product_info['mpn'],  # Ref MPN
+                '',  # Ref GTIN (empty for now)
+                product_info['price'],  # Ref Price
+                normalize_image_url(product_info['main_image']),  # Ref Main Image
+                product_info['quantity'],  # Ref Quantity
+                product_info['group_attr_1'],  # Ref Group Attr 1
+                product_info['group_attr_2'],  # Ref Group Attr 2
+                product_info['status'],  # Ref Status
+                SCRAPED_DATE  # Date Scrapped
+            ]
+            
+            with csv_lock:
+                writer.writerow(row)
+            
+            
+            stats['products_fetched'] += 1
+            
+            log(f"Fetched product {product_info['product_id']}: {product_info['name'][:50]}...", "INFO")
+            
+        except Exception as e:
+            log(f"Error creating row for product {product_id}: {e}", "ERROR")
+            stats['errors'] += 1
         
-        with csv_lock:
-            writer.writerow(row)
-        
-        stats['products_fetched'] += 1
-        log(f"Fetched product {product_info['product_id']}: {product_info['name'][:50]}...", "INFO")
-        
-    except Exception as e:
-        log(f"Error creating row for product {product_id}: {e}", "ERROR")
-        stats['errors'] += 1
     
     # Respect request delay
     time.sleep(REQUEST_DELAY)
