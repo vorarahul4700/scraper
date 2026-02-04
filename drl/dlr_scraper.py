@@ -291,16 +291,22 @@ def extract_product_data(product_data: dict) -> dict:
 
         # ---------- Additional Info ----------
         additional_data = product_data.get('additional_product_info_html', '')
+        mpn = sku
+        category = ''
+        try:
+            additional_info_dict = json.loads(additional_data)
+            mpn = additional_info_dict.get('item_number',"")
+            category = additional_info_dict.get('product_type',"")
+        except Exception as e:
+            print(f"Error setting mpn or category : {e}")
         
-        # ---------- MPN ----------
-        mpn = sku  # Using SKU as MPN since no separate MPN field
         
         # ---------- Category ----------
         # Get category from ecommerce items
         category = ''
         category_url = ''
         
-        if ecommerce_items:
+        if ecommerce_items and not category:
             # Use the first available category field
             category_fields = [
                 'item_category', 'item_category2', 'item_category3',
