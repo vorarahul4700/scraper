@@ -151,31 +151,35 @@ def extract_datalayer(html_text):
     return _clean_strings(data)
 
 def extract_additional_product_info(html_text):
-    soup = BeautifulSoup(html_text, 'html.parser')
-    
-    container = soup.find('div', class_='Product__additional-container')
-    
-    if not container:
-        container = soup.find('div', class_='data-table')
+    try:
+        soup = BeautifulSoup(html_text, 'html.parser')
+        
+        container = soup.find('div', class_='Product__additional-container')
+        
         if not container:
-            return json.dumps({})
-    
-    additional_info = {}
-
-    labels = container.find_all('div', class_='label')
-    
-    for label in labels:
-        label_text = label.get_text(strip=True)
+            container = soup.find('div', class_='data-table')
+            if not container:
+                return json.dumps({})
         
-        data_div = label.find_next_sibling('div', class_='data')
-        
-        if data_div:
-            data_text = data_div.get_text(strip=True)
-            if label_text and data_text:
-                json_key = re.sub(r'[^a-zA-Z0-9_]', '_', label_text.lower().replace(' ', '_'))
-                additional_info[json_key] = data_text
+        additional_info = {}
 
-    return json.dumps(additional_info, ensure_ascii=False)
+        labels = container.find_all('div', class_='label')
+        
+        for label in labels:
+            label_text = label.get_text(strip=True)
+            
+            data_div = label.find_next_sibling('div', class_='data')
+            
+            if data_div:
+                data_text = data_div.get_text(strip=True)
+                if label_text and data_text:
+                    json_key = re.sub(r'[^a-zA-Z0-9_]', '_', label_text.lower().replace(' ', '_'))
+                    additional_info[json_key] = data_text
+
+        return json.dumps(additional_info, ensure_ascii=False)
+    except Exception as e:
+        print(f"Error while processing additional Data: {e}")
+        return json.dumps({})
 
 def fetch_json(url: str) -> Optional[dict]:
     """Fetch JSON data with proper headers"""
