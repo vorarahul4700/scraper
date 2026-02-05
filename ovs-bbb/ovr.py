@@ -722,7 +722,7 @@ def get_sitemap_from_robots_txt():
         return None
 
 def main():
-    sitemap = get_sitemap_from_robots_txt
+    sitemap = get_sitemap_from_robots_txt()
     log("=" * 60)
     log("Overstock Parallel Scraper")
     log(f"Timestamp: {SCRAPED_DATE}")
