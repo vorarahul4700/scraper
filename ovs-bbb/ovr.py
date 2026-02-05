@@ -14,9 +14,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ================= ENV =================
 
-CURR_URL = os.getenv("CURR_URL", "https://www.overstock.com").rstrip("/")
-SITEMAP_INDEX = os.getenv("SITEMAP_INDEX", "https://api.overstock.com/sitemaps/overstock-v3/us/sitemap.xml")
-API_BASE_URL = os.getenv("API_BASE_URL", "https://www.overstock.com/api/product")
+CURR_URL = os.getenv("CURR_URL", "").rstrip("/")
+API_BASE_URL = os.getenv("API_BASE_URL", "").rstrip("/")
+BBB_API_BASE_URL = os.getenv("BBB_API_BASE_URL", "").rstrip("/")
 SITEMAP_OFFSET = int(os.getenv("SITEMAP_OFFSET", "0"))
 MAX_SITEMAPS = int(os.getenv("MAX_SITEMAPS", "0"))
 MAX_URLS_PER_SITEMAP = int(os.getenv("MAX_URLS_PER_SITEMAP", "0"))
@@ -196,6 +196,96 @@ def normalize_image_url(url: str) -> str:
 
 from typing import Dict
 
+
+def fetch_json_bbb(api_url: str) -> Optional[dict]:
+    response = requests.get(api_url, timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+def extract_bbb_data(variant_data: dict) -> Dict[str, Any]:
+    """
+    Extract data from BBB API response based on actual data structure
+    """
+    try:
+        if not variant_data:
+            return {}
+        
+        # Basic extraction
+        result = {
+            'BBB_SKU': variant_data.get('modelNumber'),
+            'BBB_ModelNumber': variant_data.get('modelNumber'),
+            'BBB_OptionId': variant_data.get('optionId'),
+            'BBB_Description': variant_data.get('description'),
+            'BBB_Dimensions': None,
+            'BBB_Attributes': None,
+            'BBB_Attributes_Count': 0,
+            'BBB_AttributeIcons_Count': 0,
+            'BBB_AttributeIcons_URLs': None,
+            'BBB_AttributeIcons_Names': None
+        }
+        
+        # Extract dimensions with units
+        dims = variant_data.get('assembledDimensions', {})
+        if dims:
+            length = dims.get('length', '')
+            width = dims.get('width', '')
+            height = dims.get('height', '')
+            length_units = dims.get('lengthUnits', '')
+            width_units = dims.get('widthUnits', '')
+            height_units = dims.get('heightUnits', '')
+            
+            # Format: LxWxH with units
+            if length and width:
+                if height and height != 0:
+                    result['BBB_Dimensions'] = f"{length}{length_units} x {width}{width_units} x {height}{height_units}"
+                else:
+                    result['BBB_Dimensions'] = f"{length}{length_units} x {width}{width_units}"
+        
+        # Extract attributes as string
+        attributes = variant_data.get('attributes', [])
+        if attributes:
+            attr_list = []
+            for attr in attributes:
+                name = attr.get('name', '').strip()
+                value = attr.get('value', '').strip()
+                if name and value:
+                    attr_list.append(f"{name}: {value}")
+            
+            if attr_list:
+                result['BBB_Attributes'] = " | ".join(attr_list)
+            result['BBB_Attributes_Count'] = len(attributes)
+        
+        # Extract attribute icons
+        icons = variant_data.get('attributeIcons', [])
+        result['BBB_AttributeIcons_Count'] = len(icons)
+        
+        # Extract icon URLs and names
+        if icons:
+            icon_urls = []
+            icon_names = []
+            for icon in icons:
+                url = icon.get('url', '')
+                attribute_name = icon.get('attributeName', '')
+                attribute_value = icon.get('attributeValue', '')
+                
+                if url:
+                    icon_urls.append(url)
+                
+                if attribute_name:
+                    icon_names.append(f"{attribute_name}: {attribute_value}")
+            
+            if icon_urls:
+                result['BBB_AttributeIcons_URLs'] = " | ".join(icon_urls)
+            
+            if icon_names:
+                result['BBB_AttributeIcons_Names'] = " | ".join(icon_names)
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error extracting BBB data: {e}")
+        return {}
+
 def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
     try:
         if not product_data or not isinstance(product_data, dict):
@@ -237,6 +327,14 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
         category = ''
         category_url = ''
 
+        bbb_url = ''
+        bbb_sku = ''
+        bbb_modelnumber = ''
+        bbb_optionid = ''
+        bbb_description = ''
+        bbb_dimensions = ''
+        bbb_attributes = ''
+
         if breadcrumbs and isinstance(breadcrumbs, list) and len(breadcrumbs) > 0:
             last = breadcrumbs[-1]
             if isinstance(last, dict):
@@ -275,6 +373,20 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
                 # Create variation-specific URL
                 if variation_id:
                     variation_url = f"{product_url}?option={variation_id}"
+                    try
+                        bbb_api_url = f"{BBB_API_BASE_URL}/{variation_id}"
+                        bbb_data = fetch_json_bbb(bbb_api_url)
+                        variant_info = extract_bbb_data(bbb_data)
+                        bbb_url = variation_url.replace("www.overstock.com","www.bedbathandbeyond.com")
+                        bbb_sku = variant_info.get('BBB_SKU', '')
+                        bbb_modelnumber = variant_info.get('BBB_ModelNumber', '')
+                        bbb_optionid = variant_info.get('BBB_OptionId', '')
+                        bbb_description = variant_info.get('BBB_Description', '')
+                        bbb_dimensions = variant_info.get('BBB_Dimensions', '')
+                        bbb_attributes = variant_info.get('BBB_Attributes', '')
+                    except Exception as e:
+                        log(f"fetch bbb data failed : {bbb_api_url}", "ERROR")
+
                 else:
                     variation_url = product_url
                 
@@ -346,7 +458,14 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
                     'variation_id': variation_id,
                     'group_attr_1': group_attr_1,
                     'group_attr_2': group_attr_2,
-                    'product_url': variation_url
+                    'product_url': variation_url,
+                    'bbb_url' : bbb_url,
+                    'bbb_sku' : bbb_sku,
+                    'bbb_modelnumber' : bbb_modelnumber,
+                    'bbb_optionid' : bbb_optionid,
+                    'bbb_description' : bbb_description,
+                    'bbb_dimensions' : bbb_dimensions,
+                    'bbb_attributes' : bbb_attributes
                 }
                 
                 all_products.append(product_info)
@@ -393,6 +512,19 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
 
                     if variation_id:
                         product_url = f"{product_url}?option={variation_id}"
+                        try
+                            bbb_api_url = f"{BBB_API_BASE_URL}/{variation_id}"
+                            bbb_data = fetch_json_bbb(bbb_api_url)
+                            variant_info = extract_bbb_data(bbb_data)
+                            bbb_url = product_url.replace("www.overstock.com","www.bedbathandbeyond.com")
+                            bbb_sku = variant_info.get('BBB_SKU', '')
+                            bbb_modelnumber = variant_info.get('BBB_ModelNumber', '')
+                            bbb_optionid = variant_info.get('BBB_OptionId', '')
+                            bbb_description = variant_info.get('BBB_Description', '')
+                            bbb_dimensions = variant_info.get('BBB_Dimensions', '')
+                            bbb_attributes = variant_info.get('BBB_Attributes', '')
+                        except Exception as e:
+                            log(f"fetch bbb data failed : {bbb_api_url}", "ERROR")
             
             # If price not found in variation, try product level
             if not price:
@@ -438,7 +570,14 @@ def extract_overstock_data(product_data: dict, product_url: str) -> List[Dict]:
                 'variation_id': variation_id,
                 'group_attr_1': group_attr_1_current,
                 'group_attr_2': group_attr_2,
-                'product_url': product_url
+                'product_url': product_url,
+                'bbb_url' : bbb_url,
+                'bbb_sku' : bbb_sku,
+                'bbb_modelnumber' : bbb_modelnumber,
+                'bbb_optionid' : bbb_optionid,
+                'bbb_description' : bbb_description,
+                'bbb_dimensions' : bbb_dimensions,
+                'bbb_attributes' : bbb_attributes
             }
             
             return [product_info]
@@ -464,7 +603,7 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict):
         return
     
     api_endpoints = [
-        f"https://www.overstock.com/api/product/{product_id}",
+        f"{API_BASE_URL}/{product_id}",
     ]
     
     data = None
@@ -527,6 +666,13 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict):
                 product_info['group_attr_1'],  # Ref Group Attr 1
                 product_info['group_attr_2'],  # Ref Group Attr 2
                 product_info['status'],  # Ref Status
+                product_info['bbb_url'],
+                product_info['bbb_sku'],
+                product_info['bbb_modelnumber'],
+                product_info['bbb_optionid'],
+                product_info['bbb_description'],
+                product_info['bbb_dimensions'],
+                product_info['bbb_attributes'],
                 SCRAPED_DATE  # Date Scrapped
             ]
             
@@ -548,14 +694,41 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict):
     stats['urls_processed'] += 1
 
 # ================= MAIN =================
+def get_sitemap_from_robots_txt():
+    try:
+        # Construct robots.txt URL
+        robots_url = f"{CURR_URL}/robots.txt"
+        
+        # Fetch the robots.txt content
+        response = requests.get(robots_url, timeout=10)
+        response.raise_for_status()
+     
+        # Extract Sitemap URL
+        sitemap_url = None
+        for line in response.text.split('\n'):
+            if line.lower().startswith('sitemap:'):
+                sitemap_url = line.split(':', 1)[1].strip()
+                break
+        
+        if sitemap_url:
+            print(f"Extracted Sitemap URL: {sitemap_url}")
+            return sitemap_url
+        else:
+            print("No Sitemap directive found in robots.txt")
+            return None
+            
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching robots.txt: {e}")
+        return None
 
 def main():
+    sitemap = get_sitemap_from_robots_txt
     log("=" * 60)
     log("Overstock Parallel Scraper")
     log(f"Timestamp: {SCRAPED_DATE}")
     log(f"Base URL: {CURR_URL}")
     log(f"API Base URL: {API_BASE_URL}")
-    log(f"Sitemap Index: {SITEMAP_INDEX}")
+    log(f"Sitemap Index: {sitemap}")
     log(f"Sitemap Offset: {SITEMAP_OFFSET}")
     log(f"Max Sitemaps: {MAX_SITEMAPS if MAX_SITEMAPS > 0 else 'All'}")
     log(f"Max URLs per Sitemap: {MAX_URLS_PER_SITEMAP if MAX_URLS_PER_SITEMAP > 0 else 'All'}")
@@ -564,8 +737,8 @@ def main():
     log("=" * 60)
     
     # Load sitemap index - NO HEADERS for sitemap
-    log(f"Loading sitemap index from {SITEMAP_INDEX}")
-    index = load_xml(SITEMAP_INDEX)
+    log(f"Loading sitemap index from {sitemap}")
+    index = load_xml(sitemap)
     if index is None:
         log("Failed to load sitemap index", "ERROR")
         sys.exit(1)
@@ -624,6 +797,15 @@ def main():
             "Ref Group Attr 1",
             "Ref Group Attr 2",
             "Ref Status",
+
+            'BBB URL': '',
+            'BBB SKU': '',
+            'BBB ModelNumber': '',
+            'BBB OptionId': '',
+            'BBB Description': '',
+            'BBB Dimensions': '',
+            'BBB Attributes': '',
+
             "Date Scrapped"
         ])
         
