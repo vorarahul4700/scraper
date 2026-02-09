@@ -422,7 +422,7 @@ def solve_recaptcha_audio(driver):
         
         # Get audio source URL with retry
         audio_src = None
-        for attempt in range(3):
+        for attempt in range(1):
             logger.info(f"Attempt {attempt + 1}/3 to get audio source...")
             audio_src = get_audio_source(driver)
             if audio_src:
