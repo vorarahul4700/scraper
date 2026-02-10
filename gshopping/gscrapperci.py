@@ -669,12 +669,12 @@ def process_chunk(chunk_file, chunk_id, total_chunks):
             pd.DataFrame(csv2_data).to_csv(csv2_path, index=False)
             print(f"✓ Saved seller info: {csv2_filename}")
         
-        # Upload to FTP
-        if csv1_data:
-            upload_to_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, csv1_path, csv1_filename)
+        # Upload to FTP STOPPED TO AVOID UNNECESSARY FTP USAGE DURING TESTING
+        # if csv1_data:
+        #     upload_to_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, csv1_path, csv1_filename)
         
-        if csv2_data:
-            upload_to_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, csv2_path, csv2_filename)
+        # if csv2_data:
+        #     upload_to_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, csv2_path, csv2_filename)
         
         print(f"\n✓ Chunk {chunk_id} processing completed")
         return True
