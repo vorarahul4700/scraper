@@ -13,6 +13,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, List, Dict, Tuple
 from xml.etree import ElementTree as ET
+from datetime import datetime, timezone
 
 # ---------- ENV ----------
 CURR_URL = os.environ.get("CURR_URL", "").rstrip("/")
@@ -108,6 +109,12 @@ class FlareSolverrSession:
         return self.flaresolverr_request(url)
 
 flaresolverr_session = FlareSolverrSession()
+
+def log(msg: str, level: str = "INFO"):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sys.stderr.write(f"[{timestamp}] [{level}] {msg}\n")
+    sys.stderr.flush()
+
 
 def check_robots_txt():
     """Check robots.txt for crawl delays and sitemap location"""
