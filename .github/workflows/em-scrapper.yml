@@ -22,42 +22,12 @@ on:
       request_delay:
         description: "Delay between requests (seconds)"
         default: "1.0"
-      flaresolverr_url:
-        description: "FlareSolverr service URL"
-        default: "http://localhost:8191/v1"
+      sample_size:
+        description: "Number of URLs to sample for product checking"
+        default: "5"
 
 jobs:
-  setup-flaresolverr:
-    runs-on: ubuntu-latest
-    outputs:
-      service_url: ${{ steps.setup.outputs.service_url }}
-    steps:
-      - name: Start FlareSolverr service
-        id: setup
-        run: |
-          # Start FlareSolverr in Docker
-          docker run -d \
-            --name flaresolverr \
-            -p 8191:8191 \
-            -e LOG_LEVEL=info \
-            --restart unless-stopped \
-            ghcr.io/flaresolverr/flaresolverr:latest
-          
-          # Wait for FlareSolverr to be ready
-          echo "Waiting for FlareSolverr to start..."
-          for i in {1..30}; do
-            if curl -s http://localhost:8191/v1 > /dev/null; then
-              echo "FlareSolverr is ready!"
-              break
-            fi
-            echo "Attempt $i: FlareSolverr not ready yet..."
-            sleep 2
-          done
-          
-          echo "service_url=http://localhost:8191/v1" >> $GITHUB_OUTPUT
-
   plan:
-    needs: setup-flaresolverr
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
@@ -97,15 +67,45 @@ jobs:
           echo "Jobs planned: $JOBS"
 
   scrape:
-    needs: [plan, setup-flaresolverr]
+    needs: plan
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJson(needs.plan.outputs.matrix) }}
     
+    # Add FlareSolverr as a service container
+    services:
+      flaresolverr:
+        image: ghcr.io/flaresolverr/flaresolverr:latest
+        ports:
+          - 8191:8191
+        options: >-
+          --health-cmd "curl -f http://localhost:8191/v1 || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          --health-start-period 30s
+    
     steps:
       - uses: actions/checkout@v4
+
+      - name: Wait for FlareSolverr to be ready
+        run: |
+          echo "Waiting for FlareSolverr service to be ready..."
+          for i in {1..30}; do
+            if curl -s http://localhost:8191/v1 > /dev/null; then
+              echo "✓ FlareSolverr is ready!"
+              # Test the service
+              RESPONSE=$(curl -s -X POST http://localhost:8191/v1 \
+                -H "Content-Type: application/json" \
+                -d '{"cmd": "sessions.list"}')
+              echo "FlareSolverr response: $RESPONSE"
+              break
+            fi
+            echo "Attempt $i: FlareSolverr not ready yet..."
+            sleep 2
+          done
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -117,6 +117,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml
 
+      - name: Create scraper file
+        run: |
+          cat > em_scraper.py << 'EOF'
+          # PASTE THE ENTIRE SCRAPER CODE HERE
+          EOF
+
       - name: Run Emma Mason scraper with FlareSolverr
         id: scrape_run
         continue-on-error: true
@@ -127,7 +133,8 @@ jobs:
           MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap }}
           MAX_WORKERS: ${{ github.event.inputs.max_workers }}
           REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
-          FLARESOLVERR_URL: ${{ needs.setup-flaresolverr.outputs.service_url }}
+          SAMPLE_SIZE: ${{ github.event.inputs.sample_size }}
+          FLARESOLVERR_URL: http://localhost:8191/v1
         run: |
           echo "Starting Emma Mason scraper with FlareSolverr:"
           echo "CURR_URL: $CURR_URL"
@@ -136,6 +143,7 @@ jobs:
           echo "MAX_URLS_PER_SITEMAP: $MAX_URLS_PER_SITEMAP"
           echo "MAX_WORKERS: $MAX_WORKERS"
           echo "REQUEST_DELAY: $REQUEST_DELAY"
+          echo "SAMPLE_SIZE: $SAMPLE_SIZE"
           echo "FLARESOLVERR_URL: $FLARESOLVERR_URL"
           echo ""
           
@@ -176,6 +184,8 @@ jobs:
           if [ -z "$CSV_FILES" ]; then
             echo "has_files=false" >> $GITHUB_OUTPUT
             echo "ERROR: No CSV files found in artifacts!"
+            echo "Checking chunks directory structure:"
+            find chunks -type f -ls 2>/dev/null || echo "chunks directory not found or empty"
             exit 0
           else
             echo "has_files=true" >> $GITHUB_OUTPUT
@@ -284,7 +294,8 @@ jobs:
           echo "  URLs/Sitemap:  ${{ github.event.inputs.urls_per_sitemap }}"
           echo "  Sitemaps/Job:  ${{ github.event.inputs.sitemaps_per_job }}"
           echo "  Total Sitemaps: ${{ github.event.inputs.total_sitemaps }}"
-          echo "  FlareSolverr:  Enabled"
+          echo "  Sample Size:   ${{ github.event.inputs.sample_size }}"
+          echo "  FlareSolverr:  Enabled (Service Container)"
           echo "========================================="
           
           if [ -f "products_full.csv" ]; then
