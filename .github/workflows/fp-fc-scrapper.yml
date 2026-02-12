@@ -29,7 +29,6 @@ on:
 jobs:
   plan:
     runs-on: ubuntu-latest
-    # FlareSolverr is needed because sitemap XMLs might be behind Cloudflare
     services:
       flaresolverr:
         image: ghcr.io/flaresolverr/flaresolverr:latest
@@ -40,6 +39,8 @@ jobs:
       matrix: ${{ steps.generate_matrix.outputs.matrix }}
       site_name: ${{ steps.get_site_name.outputs.site_name }}
     steps:
+      - uses: actions/checkout@v4   # Needed to access generate_chunks.py
+
       - name: Get site name from URL
         id: get_site_name
         run: |
@@ -83,121 +84,11 @@ jobs:
           MAX_SITEMAPS: ${{ github.event.inputs.total_sitemaps }}
           MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap }}
           URLS_PER_JOB: ${{ github.event.inputs.urls_per_job }}
-          SITEMAP_OFFSET: 0   # always start from first sitemap when chunking
+          SITEMAP_OFFSET: 0
           FLARESOLVERR_URL: http://localhost:8191/v1
-        run: |
-          python - <<'EOF'
-          import os, sys, json, time, requests
-          from concurrent.futures import ThreadPoolExecutor, as_completed
-          from xml.etree import ElementTree as ET
+        run: python fpfc/generate_chunks.py   # <-- external script
 
-          CURR_URL = os.environ['CURR_URL'].rstrip('/')
-          SITEMAP_INDEX = f"{CURR_URL}/sitemap.xml"
-          MAX_SITEMAPS = int(os.environ.get('MAX_SITEMAPS', '0'))
-          MAX_URLS_PER_SITEMAP = int(os.environ.get('MAX_URLS_PER_SITEMAP', '0'))
-          URLS_PER_JOB = int(os.environ.get('URLS_PER_JOB', '500'))
-          SITEMAP_OFFSET = int(os.environ.get('SITEMAP_OFFSET', '0'))
-          FLARESOLVERR_URL = os.environ.get('FLARESOLVERR_URL')
-
-          HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; SitemapParser/1.0)'}
-
-          def fetch_xml(url):
-              """Try normal GET first, fallback to FlareSolverr if needed."""
-              try:
-                  r = requests.get(url, headers=HEADERS, timeout=30)
-                  if r.status_code == 200:
-                      return r.text
-                  elif r.status_code in [403, 503] and FLARESOLVERR_URL:
-                      # Fallback to FlareSolverr
-                      payload = {"cmd": "request.get", "url": url, "maxTimeout": 30000}
-                      fs = requests.post(FLARESOLVERR_URL, json=payload, timeout=60)
-                      if fs.status_code == 200:
-                          return fs.json().get('solution', {}).get('response')
-              except Exception as e:
-                  print(f"Error fetching {url}: {e}")
-              return None
-
-          # 1. Get sitemap index
-          print(f"Fetching sitemap index: {SITEMAP_INDEX}")
-          index_xml = fetch_xml(SITEMAP_INDEX)
-          if not index_xml:
-              print("Failed to fetch sitemap index")
-              sys.exit(1)
-
-          root = ET.fromstring(index_xml)
-          ns = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
-          sitemap_locs = []
-          for loc in root.findall('.//ns:loc', ns) or root.findall('.//loc'):
-              if loc.text:
-                  sitemap_locs.append(loc.text.strip())
-
-          if not sitemap_locs:
-              print("No sitemaps found in index")
-              sys.exit(1)
-
-          # Apply sitemap offset and limit
-          if SITEMAP_OFFSET >= len(sitemap_locs):
-              print("Offset exceeds total sitemaps")
-              sys.exit(0)
-
-          end = SITEMAP_OFFSET + MAX_SITEMAPS if MAX_SITEMAPS > 0 else len(sitemap_locs)
-          sitemap_locs = sitemap_locs[SITEMAP_OFFSET:end]
-
-          print(f"Total sitemaps to analyze: {len(sitemap_locs)}")
-
-          # 2. For each sitemap, fetch and count product URLs
-          sitemap_stats = []
-          def process_sitemap(sm_url):
-              xml = fetch_xml(sm_url)
-              if not xml:
-                  return {'url': sm_url, 'total_urls': 0}
-              try:
-                  root_sm = ET.fromstring(xml)
-              except:
-                  return {'url': sm_url, 'total_urls': 0}
-              urls = []
-              for loc in root_sm.findall('.//ns:loc', ns) or root_sm.findall('.//loc'):
-                  if loc.text and '.html' in loc.text and not any(ext in loc.text for ext in ['.jpg','.jpeg','.png','.gif','.webp']):
-                      urls.append(loc.text.strip())
-              total = len(urls)
-              # Cap total per sitemap if requested
-              if MAX_URLS_PER_SITEMAP > 0 and total > MAX_URLS_PER_SITEMAP:
-                  total = MAX_URLS_PER_SITEMAP
-              return {'url': sm_url, 'total_urls': total}
-
-          with ThreadPoolExecutor(max_workers=5) as ex:
-              futures = [ex.submit(process_sitemap, url) for url in sitemap_locs]
-              for f in as_completed(futures):
-                  sitemap_stats.append(f.result())
-                  time.sleep(0.2)
-
-          # 3. Generate chunks (one chunk per job)
-          chunks = []
-          chunk_id = 0
-          for sm in sitemap_stats:
-              total = sm['total_urls']
-              if total == 0:
-                  continue
-              num_chunks = (total + URLS_PER_JOB - 1) // URLS_PER_JOB
-              for i in range(num_chunks):
-                  offset = i * URLS_PER_JOB
-                  limit = min(URLS_PER_JOB, total - offset)
-                  chunks.append({
-                      'sitemap_url': sm['url'],
-                      'offset': offset,
-                      'limit': limit,
-                      'chunk_id': chunk_id,
-                      'base_url': CURR_URL
-                  })
-                  chunk_id += 1
-
-          print(f"Generated {len(chunks)} chunks")
-          matrix_json = json.dumps(chunks)
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f"matrix={matrix_json}\n")
-          EOF
-
-      - name: Output matrix (debug)
+      - name: Debug matrix output
         run: |
           echo "Generated matrix:"
           echo '${{ steps.generate_matrix.outputs.matrix }}' | jq . || echo "Not valid JSON"
@@ -239,12 +130,6 @@ jobs:
       - name: Install dependencies
         run: pip install requests beautifulsoup4 lxml
 
-      - name: Create scraper file
-        run: |
-          cat > em_scraper.py << 'EOF'
-          # PASTE THE COMPLETE SCRAPER CODE FROM ABOVE HERE
-          EOF
-
       - name: Run scraper chunk
         id: scrape_run
         continue-on-error: true
@@ -262,7 +147,7 @@ jobs:
           echo "Processing chunk $CHUNK_ID"
           echo "Sitemap: $SITEMAP_URL"
           echo "Offset: $URL_OFFSET, Limit: $MAX_URLS_PER_SITEMAP"
-          python em_scraper.py || echo "Scraper failed with exit code $?"
+          python fpfc/fp_fc_scraper.py || echo "Scraper failed with exit code $?"
 
       - name: Upload chunk artifact
         uses: actions/upload-artifact@v4
