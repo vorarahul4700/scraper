@@ -170,7 +170,7 @@ except Exception as e:
     sys.exit(1)
           "
           
-          python em_scraper.py || echo "Scraper failed with exit code $?"
+          python drl/em_scraper.py || echo "Scraper failed with exit code $?"
           
           echo ""
           echo "Generated files:"
