@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 # ================= ENV =================
 
@@ -263,98 +264,6 @@ def load_xml(url: str, crawl_delay=None) -> Optional[ET.Element]:
         log(f"XML parse error for {url}: {e}")
         return None
 
-def _clean_strings(obj):
-    """Recursively clean JSON-escaped strings like \\/"""
-    if isinstance(obj, dict):
-        return {k: _clean_strings(v) for k, v in obj.items()}
-    
-    if isinstance(obj, list):
-        return [_clean_strings(v) for v in obj]
-    
-    if isinstance(obj, str):
-        return obj.replace('\\/', '/')
-    
-    return obj
-
-def extract_datalayer(html_text):
-    patterns = [
-        # r'dataLayer\.push\s*\(\s*(\{[\s\S]*?\})\s*\);',
-         r'gtag\s*\(\s*[\'"]event[\'"]\s*,\s*[\'"][^\'"]+[\'"]\s*,\s*(\{[\s\S]*?\})\s*\)\s*;?',
-    ]
-    
-    raw = None
-    for pattern in patterns:
-        match = re.search(pattern, html_text)
-        if match:
-            raw = match.group(1)
-            break
-    
-    if not raw:
-        return None
-    
-    raw = html.unescape(raw)
-
-    raw = raw.replace(':true', ':True') \
-             .replace(':false', ':False') \
-             .replace(':null', ':None') \
-             .replace('true,', 'True,') \
-             .replace('false,', 'False,') \
-             .replace('null,', 'None,')
-    
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        try:
-            if raw.strip().startswith('{'):
-                raw = f'[{raw}]'
-            data = ast.literal_eval(raw)
-        except (SyntaxError, ValueError):
-            raw = re.sub(r',\s*}', '}', raw)
-            raw = re.sub(r',\s*]', ']', raw)
-            try:
-                data = json.loads(raw)
-            except:
-                return None
-
-    return _clean_strings(data)
-
-def extract_additional_product_info(html_text):
-    try:
-        soup = BeautifulSoup(html_text, 'html.parser')
-        table = soup.find('table', id='product-attribute-specs-table')
-        
-        if not table:
-            table = soup.find('table', class_='additional-attributes')
-            if not table:
-                return json.dumps({})
-        
-        additional_info = {}
-        
-        tbody = table.find('tbody')
-        if tbody:
-            rows = tbody.find_all('tr')
-        else:
-            rows = table.find_all('tr')
-        
-        for row in rows:
-            th = row.find('th')
-            td = row.find('td')
-            
-            if th and td:
-                label_text = th.get_text(strip=True)
-                data_text = td.get_text(strip=True)
-                
-                if label_text and data_text:
-                    json_key = re.sub(r'[^a-zA-Z0-9_]', '_', label_text.lower().replace(' ', '_'))
-                    json_key = json_key.strip('_')
-                    additional_info[json_key] = data_text
-        
-        return json.dumps(additional_info, ensure_ascii=False)
-    except Exception as e:
-        print(f"Error while processing additional Data: {e}")
-        return json.dumps({})
-
-
 csv_lock = threading.Lock()
 
 def normalize_image_url(url: str) -> str:
@@ -370,99 +279,6 @@ def normalize_image_url(url: str) -> str:
     
     return url
 
-def extract_product_data(product_data: dict) -> dict:
-    try:
-        product_id = str(product_data.get('ecomm_prodid', [''])[0] if isinstance(product_data.get('ecomm_prodid'), list) and product_data.get('ecomm_prodid') else '')
-        
-        ecommerce_items = product_data.get('ecommerce', {}).get('items', [])
-        name = ''
-        if ecommerce_items:
-            name = ecommerce_items[0].get('item_name', '').strip()
-        if not name:
-            name = product_data.get('product', {}).get('name', '').strip()
-        if not product_id:
-            name = product_data.get('product', {}).get('id', '').strip()
-        
-        sku = product_data.get('ecomm_prodsku', '')
-        if not sku:
-            sku = product_data.get('product', {}).get('sku', '')
-        
-        brand = ''
-        quantity = 0
-        price = ''
-        
-        if ecommerce_items:
-            brand = ecommerce_items[0].get('item_brand', '')
-            quantity = ecommerce_items[0].get('quantity', 0)
-            price_item = ecommerce_items[0].get('price', '')
-            if price_item:
-                price = str(price_item)
-        
-        if not price:
-            ecomm_value = product_data.get('ecommerce', {}).get('value', '')
-            if ecomm_value:
-                price = str(ecomm_value)
-        
-        main_image = ''
-        additional_data = product_data.get('additional_product_info_html', '')
-        mpn = sku
-        category = ''
-        
-        try:
-            additional_info_dict = json.loads(additional_data)
-            mpn = additional_info_dict.get('item_number',"")
-            category = additional_info_dict.get('product_type',"")
-        except Exception as e:
-            print(f"Error setting mpn or category : {e}")
-        
-        category_url = ''
-        
-        if ecommerce_items and not category:
-            category_fields = [
-                'item_category', 'item_category2', 'item_category3',
-                'item_category4', 'item_category5', 'item_category6',
-                'item_category7', 'item_category8', 'item_category9'
-            ]
-            categories = []
-            for field in category_fields:
-                cat_value = ecommerce_items[0].get(field, '')
-                if cat_value:
-                    categories.append(cat_value)
-            
-            if categories:
-                category = ' | '.join(categories)
-        
-        availability = product_data.get('ecommerce', {}).get('magentoProductAvailability', '')
-        status = 'OUT_OF_STOCK'
-        
-        if availability == 'InStock':
-            status = 'SELLABLE'
-        
-        variation_id = ''
-        group_attr_1 = ''
-        group_attr_2 = ''
-        
-        return {
-            'product_id': product_id,
-            'name': name,
-            'brand': brand,
-            'price': price,
-            'main_image': main_image,
-            'sku': sku,
-            'mpn': mpn,
-            'category': category,
-            'category_url': category_url,
-            'quantity': quantity,
-            'status': status,
-            'variation_id': variation_id,
-            'group_attr_1': group_attr_1,
-            'group_attr_2': group_attr_2,
-            'additional_data': additional_data,
-        }
-        
-    except Exception as e:
-        print(f"Error extracting product data: {e}")
-        return {}
 def extract_product_info_from_html(html: str, product_url: str) -> dict:
     """
     Parse product HTML and return a dictionary with all required fields.
@@ -643,56 +459,207 @@ def extract_product_info_from_html(html: str, product_url: str) -> dict:
     return info
 
 
+def getBundleData(html):
+  
+    soup = BeautifulSoup(html, 'html.parser')
+    
+    # Find script tags containing Product.Bundle initialization
+    script_pattern = re.compile(r'var bundle = new Product\.Bundle\(({.*?})\);', re.DOTALL)
+    
+    # Look in all script tags
+    for script in soup.find_all('script'):
+        if script.string:
+            # Search for Product.Bundle pattern
+            match = script_pattern.search(script.string)
+            if match:
+                # Return the raw JSON string from the JavaScript object
+                return match.group(1).strip()
+    
+    return None
 
 def process_product_data(product_url: str, writer, seen: set, stats: dict, crawl_delay=None):
-
     if product_url in seen:
         return
     seen.add(product_url)
 
     log(f"Processing product URL: {product_url}", "DEBUG")
 
-    # Fetch HTML (http_get is assumed to be defined elsewhere)
-    html = http_get(product_url, crawl_delay)  # uses crawl_delay if provided
+    # Fetch the original product page
+    html = http_get(product_url, crawl_delay)
+    soup = BeautifulSoup(html, 'html.parser')
 
-    try:
-        product_info = extract_product_info_from_html(html, product_url)
-    except Exception as e:
-        log(f"Failed to extract product info from {product_url}: {e}", "ERROR")
-        stats['errors'] += 1
-        return
+    # --- Extract bundle data from JavaScript ---
+    bundleId = None
+    bundle_option_id = None
+    max_selections_length = 0
+    bundleJson = getBundleData(html)
+    if bundleJson:
+        try:
+            bundleData = json.loads(bundleJson)
+            bundleId = bundleData.get('bundleId')
+            if bundleId:
+                options = bundleData.get('options', {})
+                for opt_id, opt_data in options.items():
+                    selections = opt_data.get('selections', {})
+                    sel_len = len(selections)
+                    if sel_len > max_selections_length:
+                        max_selections_length = sel_len
+                        bundle_option_id = opt_id
+        except Exception as e:
+            log(f"Error parsing bundle data for {product_url}: {e}", "WARNING")
 
-    try:
-        row = [
-            product_url,
-            product_info.get('product_id',''),
-            product_info.get('variation_id',''),
-            product_info.get('category',''),
-            product_info.get('category_url',''),
-            product_info.get('brand',''),
-            product_info.get('name',''),
-            product_info.get('sku',''),
-            product_info.get('mpn',''),
-            '',                                 # empty column
-            product_info.get('price',''),
-            normalize_image_url(product_info.get('main_image','')),
-            product_info.get('quantity',''),
-            product_info.get('group_attr_1',''),
-            product_info.get('group_attr_2',''),
-            product_info.get('status',''),
-            product_info.get('additional_data',''),
-            SCRAPED_DATE
-        ]
+    is_bundle = bool(bundleId and bundle_option_id and max_selections_length > 0)
+    variation_rows_written = 0
 
-        with csv_lock:
-            writer.writerow(row)
+    if is_bundle:
+        log(f"Bundle detected (ID: {bundleId}, option: {bundle_option_id}, max selections: {max_selections_length}).", "DEBUG")
 
-        stats['products_fetched'] += 1
-        log(f"Fetched product {product_info.get('sku', '')}: {product_info.get('name', '')[:50]}...", "INFO")
+        bundle_set = soup.find('div', class_='bundle-set')
+        if not bundle_set:
+            log("No <div class='bundle-set'> found – cannot process variations. Writing original row as fallback.", "WARNING")
+        else:
+            selection_items = bundle_set.find_all('li', class_=lambda c: c and 'selection-item-' in ' '.join(c) if c else False)
+            if not selection_items:
+                log("No selection items found in bundle-set – cannot process variations. Writing original row as fallback.", "WARNING")
+            else:
+                # Build set of expected selection names
+                expected_names = set()
+                selection_id_to_name = {}
+                active_original_name = None
+                for li in selection_items:
+                    sel_id = None
+                    for cls in li.get('class', []):
+                        if cls.startswith('selection-item-'):
+                            sel_id = cls.replace('selection-item-', '')
+                            break
+                    name = li.get('data-item-set-name', li.get_text(strip=True))
+                    if sel_id:
+                        selection_id_to_name[sel_id] = name
+                    expected_names.add(name)
+                    if 'active' in li.get('class', []):
+                        active_original_name = name
 
-    except Exception as e:
-        log(f"Error creating row for product {product_info.get('product_id', 'unknown')}: {e}", "ERROR")
-        stats['errors'] += 1
+                log(f"Expected names: {expected_names} | Active on original: {active_original_name}", "DEBUG")
+
+                processed_names = set()
+
+                for i in range(1, max_selections_length + 1):
+                    items_value = bundleId - i
+                    parsed = urlparse(product_url)
+                    query_dict = parse_qs(parsed.query, keep_blank_values=True)
+
+                    # Remove any existing items parameters
+                    keys_to_remove = [k for k in query_dict if k.startswith('items')]
+                    for k in keys_to_remove:
+                        del query_dict[k]
+
+                    param_key = f'items'
+                    query_dict[param_key] = [str(items_value)]
+                    new_query = urlencode(query_dict, doseq=True)
+                    new_parsed = parsed._replace(query=new_query)
+                    variation_url = urlunparse(new_parsed)
+
+                    log(f"Fetching variation: {variation_url}", "DEBUG")
+                    variation_html = http_get(variation_url, crawl_delay)
+                    if not variation_html:
+                        continue
+
+                    variation_soup = BeautifulSoup(variation_html, 'html.parser')
+                    var_bundle_set = variation_soup.find('div', class_='bundle-set')
+                    if not var_bundle_set:
+                        continue
+
+                    var_active_li = var_bundle_set.find('li', class_='active')
+                    if not var_active_li:
+                        continue
+
+                    active_name = var_active_li.get('data-item-set-name', var_active_li.get_text(strip=True))
+
+                    if active_name not in expected_names:
+                        log(f"Active name '{active_name}' not in expected set, skipping.", "DEBUG")
+                        continue
+                    if active_name in processed_names:
+                        log(f"Already processed '{active_name}', skipping duplicate.", "DEBUG")
+                        continue
+
+                    # --- Valid variation – extract product data ---
+                    try:
+                        var_product_info = extract_product_info_from_html(variation_html, variation_url)
+                    except Exception as e:
+                        log(f"Failed to extract product info from variation: {e}", "ERROR")
+                        stats['errors'] += 1
+                        continue
+
+                    # Write CSV row
+                    try:
+                        row = [
+                            variation_url,
+                            var_product_info.get('product_id', ''),
+                            var_product_info.get('variation_id', ''),
+                            var_product_info.get('category', ''),
+                            var_product_info.get('category_url', ''),
+                            var_product_info.get('brand', ''),
+                            var_product_info.get('name', ''),
+                            var_product_info.get('sku', ''),
+                            var_product_info.get('mpn', ''),
+                            '',  # empty column
+                            var_product_info.get('price', ''),
+                            normalize_image_url(var_product_info.get('main_image', '')),
+                            var_product_info.get('quantity', ''),
+                            var_product_info.get('group_attr_1', ''),
+                            var_product_info.get('group_attr_2', ''),
+                            var_product_info.get('status', ''),
+                            var_product_info.get('additional_data', ''),
+                            SCRAPED_DATE
+                        ]
+                        with csv_lock:
+                            writer.writerow(row)
+                        stats['products_fetched'] += 1
+                        variation_rows_written += 1
+                        processed_names.add(active_name)
+                        log(f"Fetched bundle variation: {active_name}", "INFO")
+                    except Exception as e:
+                        log(f"Error writing row for variation: {e}", "ERROR")
+                        stats['errors'] += 1
+
+                    time.sleep(REQUEST_DELAY_BASE)
+
+                # After loop: warn about missing variations
+                missing = expected_names - processed_names
+                if missing:
+                    log(f"WARNING: Missing variations: {missing}", "WARNING")
+
+    # --- If we are not a bundle, OR we are a bundle but failed to write any variation row, write the original product row ---
+    if not is_bundle or variation_rows_written == 0:
+        try:
+            product_info = extract_product_info_from_html(html, product_url)
+            row = [
+                product_url,
+                product_info.get('product_id', ''),
+                product_info.get('variation_id', ''),
+                product_info.get('category', ''),
+                product_info.get('category_url', ''),
+                product_info.get('brand', ''),
+                product_info.get('name', ''),
+                product_info.get('sku', ''),
+                product_info.get('mpn', ''),
+                '',  # empty column
+                product_info.get('price', ''),
+                normalize_image_url(product_info.get('main_image', '')),
+                product_info.get('quantity', ''),
+                product_info.get('group_attr_1', ''),
+                product_info.get('group_attr_2', ''),
+                product_info.get('status', ''),
+                product_info.get('additional_data', ''),
+                SCRAPED_DATE
+            ]
+            with csv_lock:
+                writer.writerow(row)
+            stats['products_fetched'] += 1
+            log(f"Fetched original product {product_info.get('sku', '')}: {product_info.get('name', '')[:50]}...", "INFO")
+        except Exception as e:
+            log(f"Failed to extract/write original product info: {e}", "ERROR")
+            stats['errors'] += 1
 
     time.sleep(REQUEST_DELAY_BASE)
     stats['urls_processed'] += 1
