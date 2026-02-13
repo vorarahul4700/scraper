@@ -74,7 +74,6 @@ jobs:
       matrix:
         include: ${{ fromJson(needs.plan.outputs.matrix) }}
     
-    # Simplified service container without health check
     services:
       flaresolverr:
         image: ghcr.io/flaresolverr/flaresolverr:latest
@@ -88,17 +87,12 @@ jobs:
       - name: Wait for FlareSolverr to be ready
         run: |
           echo "Waiting for FlareSolverr service to be ready..."
-          # Give the container time to start
           sleep 10
-          
-          # Test connection with retries
           for i in {1..30}; do
             if curl -s -f -X POST http://localhost:8191/v1 \
               -H "Content-Type: application/json" \
               -d '{"cmd": "sessions.list"}' > /dev/null 2>&1; then
               echo "✓ FlareSolverr is ready!"
-              
-              # Test with a simple request
               TEST_RESPONSE=$(curl -s -X POST http://localhost:8191/v1 \
                 -H "Content-Type: application/json" \
                 -d '{"cmd": "sessions.create"}')
@@ -107,7 +101,6 @@ jobs:
             fi
             echo "Attempt $i: FlareSolverr not ready yet..."
             sleep 2
-            
             if [ $i -eq 30 ]; then
               echo "❌ FlareSolverr failed to start after 60 seconds"
               docker logs flaresolverr || true
@@ -128,7 +121,7 @@ jobs:
       - name: Create scraper file
         run: |
           cat > em_scraper.py << 'EOF'
-          # PASTE THE COMPLETE SCRAPER CODE HERE
+          # PASTE THE COMPLETE UPDATED SCRAPER CODE FROM BELOW
           EOF
 
       - name: Run Emma Mason scraper with FlareSolverr
@@ -155,7 +148,6 @@ jobs:
           echo "FLARESOLVERR_URL: $FLARESOLVERR_URL"
           echo ""
           
-          # Add connection test in Python
           python -c "
           import requests
           import sys
@@ -203,7 +195,6 @@ jobs:
         id: check_files
         run: |
           CSV_FILES=$(find chunks -name "products_chunk_*.csv" 2>/dev/null || echo "")
-          
           if [ -z "$CSV_FILES" ]; then
             echo "has_files=false" >> $GITHUB_OUTPUT
             echo "ERROR: No CSV files found in artifacts!"
@@ -221,14 +212,10 @@ jobs:
         if: steps.check_files.outputs.has_files == 'true'
         run: |
           echo "Merging CSV chunks..."
-          
           CSV_FILES=$(find chunks -name "products_chunk_*.csv")
-          
           FIRST_FILE=$(echo "$CSV_FILES" | head -n 1)
           echo "Using header from: $FIRST_FILE"
-          
           head -n 1 "$FIRST_FILE" > products_full.csv
-          
           TOTAL_ROWS=0
           FILE_COUNT=0
           for f in $CSV_FILES; do
@@ -240,7 +227,6 @@ jobs:
               tail -n +2 "$f" 2>/dev/null | sed '/^$/d' >> products_full.csv
             fi
           done
-          
           FINAL_ROWS=$(tail -n +2 products_full.csv 2>/dev/null | wc -l || echo "0")
           echo "Merged $FINAL_ROWS rows from $FILE_COUNT files"
           echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
@@ -270,9 +256,7 @@ jobs:
             echo "FTP credentials not configured. Skipping FTP upload."
             exit 0
           fi
-
           sudo apt-get update && sudo apt-get install -y lftp
-
           lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
           set ftp:ssl-allow no
           set cmd:fail-exit yes
@@ -280,7 +264,6 @@ jobs:
           put products_full.csv -o $FILE
           bye
           EOF
-
           echo "Upload completed: $FILE"
 
       - name: Create summary report

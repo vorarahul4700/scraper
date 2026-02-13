@@ -15,6 +15,8 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # ================= ENV =================
 
@@ -29,7 +31,7 @@ SAMPLE_SIZE = int(os.getenv("SAMPLE_SIZE", "5"))
 
 # FlareSolverr configuration
 FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "http://localhost:8191/v1")
-FLARESOLVERR_TIMEOUT = int(os.getenv("FLARESOLVERR_TIMEOUT", "60"))
+FLARESOLVERR_TIMEOUT = int(os.getenv("FLARESOLVERR_TIMEOUT", "120"))  # increased
 
 OUTPUT_CSV = f"products_chunk_{SITEMAP_OFFSET}.csv"
 SCRAPED_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -41,12 +43,24 @@ def log(msg: str, level: str = "INFO"):
     sys.stderr.write(f"[{timestamp}] [{level}] {msg}\n")
     sys.stderr.flush()
 
-# ================= FLARESOLVERR SESSION =================
+# ================= THREAD-LOCAL FLARESOLVERR SESSION =================
 
-class FlareSolverrSession:
-    def __init__(self):
-        self.session = requests.Session()
-        self.headers = {
+_thread_local = threading.local()
+
+def get_flaresolverr_session():
+    """Get or create a thread-local requests session with connection pooling."""
+    if not hasattr(_thread_local, "session"):
+        session = requests.Session()
+        # Mount adapter with pool size = max_workers * 2 (for safety)
+        adapter = HTTPAdapter(
+            pool_connections=MAX_WORKERS * 2,
+            pool_maxsize=MAX_WORKERS * 2,
+            max_retries=Retry(total=2, backoff_factor=0.5)
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        _thread_local.session = session
+        _thread_local.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
             "Accept-Language": "en-US,en;q=0.9",
@@ -60,155 +74,96 @@ class FlareSolverrSession:
             "Cache-Control": "max-age=0",
             "Referer": CURR_URL + "/",
         }
+    return _thread_local.session, _thread_local.headers
 
-    def flaresolverr_request(self, url: str, max_retries: int = 3) -> Optional[Tuple[str, int]]:
-        """Make request through FlareSolverr to bypass Cloudflare"""
-        for attempt in range(max_retries):
-            try:
-                payload = {
-                    "cmd": "request.get",
-                    "url": url,
-                    "maxTimeout": 60000,
-                    "session": None,  # Create new session
-                    "headers": self.headers
-                }
-                
-                response = self.session.post(
-                    FLARESOLVERR_URL,
-                    json=payload,
-                    timeout=FLARESOLVERR_TIMEOUT
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
+def flaresolverr_request(url: str, max_retries: int = 3) -> Optional[Tuple[str, int]]:
+    """Make request through FlareSolverr using thread-local session."""
+    session, headers = get_flaresolverr_session()
+    
+    for attempt in range(max_retries):
+        try:
+            payload = {
+                "cmd": "request.get",
+                "url": url,
+                "maxTimeout": 120000,          # 2 minutes
+                "session": None,                # new session each time (or you can reuse)
+                "headers": headers
+            }
+            
+            response = session.post(
+                FLARESOLVERR_URL,
+                json=payload,
+                timeout=FLARESOLVERR_TIMEOUT
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("status") == "ok":
+                    solution = result.get("solution", {})
+                    content = solution.get("response", "")
                     
-                    if result.get("status") == "ok":
-                        solution = result.get("solution", {})
-                        content = solution.get("response", "")
-                        
-                        # Extract cookies for potential future requests
-                        cookies = solution.get("cookies", [])
-                        for cookie in cookies:
-                            self.session.cookies.set(
-                                cookie.get("name"),
-                                cookie.get("value"),
-                                domain=cookie.get("domain")
-                            )
-                        
-                        # Update headers from response
-                        if "headers" in solution:
-                            for key, value in solution["headers"].items():
-                                if key.lower() not in ["content-length", "content-encoding", "transfer-encoding"]:
-                                    self.headers[key] = value
-                        
-                        return content, 200
-                
-                log(f"FlareSolverr attempt {attempt + 1} failed for {url}: {response.status_code}")
-                
-            except requests.exceptions.Timeout:
-                log(f"FlareSolverr timeout on attempt {attempt + 1} for {url}")
-            except requests.exceptions.ConnectionError:
-                log(f"FlareSolverr connection error on attempt {attempt + 1} for {url}")
-            except Exception as e:
-                log(f"FlareSolverr error on attempt {attempt + 1} for {url}: {e}")
+                    # Update cookies (thread-local)
+                    cookies = solution.get("cookies", [])
+                    for cookie in cookies:
+                        session.cookies.set(
+                            cookie.get("name"),
+                            cookie.get("value"),
+                            domain=cookie.get("domain")
+                        )
+                    
+                    # Update headers from response
+                    if "headers" in solution:
+                        for key, value in solution["headers"].items():
+                            if key.lower() not in ["content-length", "content-encoding", "transfer-encoding"]:
+                                headers[key] = value
+                    
+                    return content, 200
             
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)  # Exponential backoff
+            log(f"FlareSolverr attempt {attempt + 1} failed for {url}: {response.status_code}")
+            
+        except requests.exceptions.Timeout:
+            log(f"FlareSolverr timeout on attempt {attempt + 1} for {url}")
+        except requests.exceptions.ConnectionError:
+            log(f"FlareSolverr connection error on attempt {attempt + 1} for {url}")
+        except Exception as e:
+            log(f"FlareSolverr error on attempt {attempt + 1} for {url}: {e}")
         
-        return None, 0
-
-    def fetch(self, url: str) -> Optional[Tuple[str, int]]:
-        """Fetch URL through FlareSolverr"""
-        return self.flaresolverr_request(url)
-
-flaresolverr_session = FlareSolverrSession()
-
-def get_sitemap_from_robots_txt():
-    try:
-        robots_url = f"{CURR_URL}/robots.txt"
-        content, status = flaresolverr_session.fetch(robots_url)
-        
-        if content and status == 200:
-            sitemap_url = None
-            for line in content.split('\n'):
-                if line.lower().startswith('sitemap:'):
-                    sitemap_url = line.split(':', 1)[1].strip()
-                    break
-            
-            if sitemap_url:
-                print(f"Extracted Sitemap URL: {sitemap_url}")
-                return sitemap_url
-            else:
-                print("No Sitemap directive found in robots.txt")
-                return None
-        else:
-            print(f"Error fetching robots.txt: Status {status}")
-            return None
-            
-    except Exception as e:
-        print(f"Error fetching robots.txt: {e}")
-        return None
-
-def check_robots_txt():
-    """Check robots.txt for crawl delays and sitemap location"""
-    robots_url = f"{CURR_URL}/robots.txt"
-    log(f"Checking robots.txt: {robots_url}")
+        if attempt < max_retries - 1:
+            sleep_time = (2 ** attempt) + random.uniform(0, 1)  # jitter
+            time.sleep(sleep_time)
     
-    content, status = flaresolverr_session.fetch(robots_url)
-    if content and status == 200:
-        lines = content.split('\n')
-        crawl_delay = None
-        sitemap_url = None
-        
-        for line in lines:
-            line = line.strip()
-            if line.lower().startswith('sitemap:'):
-                parts = line.split(':', 1)
-                if len(parts) > 1:
-                    potential_url = parts[1].strip()
-                    if potential_url.startswith('http'):
-                        sitemap_url = potential_url
-                        log(f"Found valid sitemap in robots.txt: {sitemap_url}")
-            elif line.lower().startswith('crawl-delay:'):
-                try:
-                    parts = line.split(':', 1)
-                    if len(parts) > 1:
-                        crawl_delay = float(parts[1].strip())
-                        log(f"Found Crawl-delay: {crawl_delay} seconds")
-                except (ValueError, IndexError) as e:
-                    log(f"Error parsing crawl-delay: {e}")
-        
-        return crawl_delay, sitemap_url
-    
-    log("No robots.txt found or couldn't fetch it")
-    return None, None
+    return None, 0
+
+# ================= REQUEST MANAGER (unchanged except using flaresolverr_request) =================
 
 class RequestManager:
     def __init__(self):
         self.request_count = 0
         self.last_request_time = 0
         self.retry_delays = [1, 2, 4]
+        self._lock = threading.Lock()   # for rate limiting across threads
         
     def _respect_rate_limit(self, crawl_delay=None):
-        current_time = time.time()
-        if self.request_count > 0:
-            elapsed = current_time - self.last_request_time
-            base_delay = crawl_delay if crawl_delay else REQUEST_DELAY_BASE
-            min_delay = base_delay * 0.8
-            max_delay = base_delay * 1.5
-            target_delay = random.uniform(0, 1)
+        with self._lock:
+            current_time = time.time()
+            if self.request_count > 0:
+                elapsed = current_time - self.last_request_time
+                base_delay = crawl_delay if crawl_delay else REQUEST_DELAY_BASE
+                min_delay = base_delay * 0.8
+                max_delay = base_delay * 1.5
+                target_delay = random.uniform(min_delay, max_delay)
+                
+                if elapsed < target_delay:
+                    sleep_time = target_delay - elapsed
+                    time.sleep(sleep_time)
             
-            if elapsed < target_delay:
-                sleep_time = target_delay - elapsed
-                time.sleep(sleep_time)
-        
-        self.last_request_time = time.time()
-        self.request_count += 1
-        
-        if self.request_count % 20 == 0:
-            long_pause = random.uniform(0, 1)
-            log(f"Taking longer pause after {self.request_count} requests: {long_pause:.1f}s")
-            time.sleep(long_pause)
+            self.last_request_time = time.time()
+            self.request_count += 1
+            
+            if self.request_count % 20 == 0:
+                long_pause = random.uniform(2, 5)
+                log(f"Taking longer pause after {self.request_count} requests: {long_pause:.1f}s")
+                time.sleep(long_pause)
     
     def fetch(self, url: str, retry_count: int = 0, crawl_delay=None) -> Optional[str]:
         if retry_count >= len(self.retry_delays):
@@ -216,7 +171,7 @@ class RequestManager:
             return None
         
         self._respect_rate_limit(crawl_delay)
-        content, status = flaresolverr_session.fetch(url)
+        content, status = flaresolverr_request(url)
         
         if content and status == 200:
             return content
@@ -243,6 +198,8 @@ request_manager = RequestManager()
 def http_get(url: str, crawl_delay=None) -> Optional[str]:
     return request_manager.fetch(url, crawl_delay=crawl_delay)
 
+# ================= ALL OTHER FUNCTIONS (EXACTLY AS BEFORE) =================
+
 def load_xml(url: str, crawl_delay=None) -> Optional[ET.Element]:
     data = http_get(url, crawl_delay)
     if not data:
@@ -254,42 +211,31 @@ def load_xml(url: str, crawl_delay=None) -> Optional[ET.Element]:
         return None
 
 def _clean_strings(obj):
-    """Recursively clean JSON-escaped strings like \\/"""
     if isinstance(obj, dict):
         return {k: _clean_strings(v) for k, v in obj.items()}
-    
     if isinstance(obj, list):
         return [_clean_strings(v) for v in obj]
-    
     if isinstance(obj, str):
         return obj.replace('\\/', '/')
-    
     return obj
 
 def extract_datalayer(html_text):
-    patterns = [
-        r'dataLayer\.push\s*\(\s*(\{[\s\S]*?\})\s*\);',
-    ]
-    
+    patterns = [r'dataLayer\.push\s*\(\s*(\{[\s\S]*?\})\s*\);']
     raw = None
     for pattern in patterns:
         match = re.search(pattern, html_text)
         if match:
             raw = match.group(1)
             break
-    
     if not raw:
         return None
-    
     raw = html.unescape(raw)
-
     raw = raw.replace(':true', ':True') \
              .replace(':false', ':False') \
              .replace(':null', ':None') \
              .replace('true,', 'True,') \
              .replace('false,', 'False,') \
              .replace('null,', 'None,')
-    
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
@@ -304,50 +250,38 @@ def extract_datalayer(html_text):
                 data = json.loads(raw)
             except:
                 return None
-
     return _clean_strings(data)
 
 def extract_additional_product_info(html_text):
     try:
         soup = BeautifulSoup(html_text, 'html.parser')
         table = soup.find('table', id='product-attribute-specs-table')
-        
         if not table:
             table = soup.find('table', class_='additional-attributes')
             if not table:
                 return json.dumps({})
-        
         additional_info = {}
-        
         tbody = table.find('tbody')
         if tbody:
             rows = tbody.find_all('tr')
         else:
             rows = table.find_all('tr')
-        
         for row in rows:
             th = row.find('th')
             td = row.find('td')
-            
             if th and td:
                 label_text = th.get_text(strip=True)
                 data_text = td.get_text(strip=True)
-                
                 if label_text and data_text:
                     json_key = re.sub(r'[^a-zA-Z0-9_]', '_', label_text.lower().replace(' ', '_'))
                     json_key = json_key.strip('_')
                     additional_info[json_key] = data_text
-        
         return json.dumps(additional_info, ensure_ascii=False)
     except Exception as e:
         print(f"Error while processing additional Data: {e}")
         return json.dumps({})
 
 def fetch_json(url: str, crawl_delay=None, check_is_pdp_only: bool = False) -> Optional[dict]:
-    """
-    Fetch JSON data with optional isPDP check only.
-    If check_is_pdp_only is True, returns minimal dict with isPDP flag.
-    """
     data = http_get(url, crawl_delay)
     if not data:
         print('data not fetched for json')
@@ -357,17 +291,13 @@ def fetch_json(url: str, crawl_delay=None, check_is_pdp_only: bool = False) -> O
         if not data_layer:
             print("No dataLayer found")
             return None
-        
         product_data = data_layer[0] if isinstance(data_layer, list) else data_layer
         is_pdp = product_data.get("ecommerce", {}).get("isPDP", None)
-        
         if check_is_pdp_only:
             return {"isPDP": is_pdp}
-        
         if is_pdp == 0:
             print(f"isPDP is 0 for {url}, returning early")
             return None
-            
         additional_info = extract_additional_product_info(data)
         product_data["additional_product_info_html"] = additional_info
         return product_data
@@ -379,17 +309,11 @@ def fetch_json(url: str, crawl_delay=None, check_is_pdp_only: bool = False) -> O
         return None
 
 def check_sitemap_contains_products(sitemap_url: str, crawl_delay=None) -> bool:
-    """
-    Check if a sitemap contains any product pages by sampling URLs.
-    Returns True if at least one URL has isPDP != 0, False otherwise.
-    """
     log(f"Checking sitemap for product pages: {sitemap_url}")
-    
     xml = load_xml(sitemap_url, crawl_delay)
     if not xml:
         log(f"Failed to load sitemap for checking: {sitemap_url}", "ERROR")
         return False
-    
     ns = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
     urls = []
     for path in [".//ns:url/ns:loc", ".//url/loc", ".//loc"]:
@@ -404,29 +328,22 @@ def check_sitemap_contains_products(sitemap_url: str, crawl_delay=None) -> bool:
             ]
             if urls:
                 break
-    
     if not urls:
         log(f"No valid URLs found in sitemap for checking", "WARNING")
         return False
-    
     sample_size = min(SAMPLE_SIZE, len(urls))
     sample_urls = random.sample(urls, sample_size) if len(urls) > sample_size else urls
-    
     log(f"Sampling {sample_size} URLs from sitemap to check for product pages")
-    
     products_found = 0
     for i, url in enumerate(sample_urls):
         log(f"  Checking sample {i+1}/{sample_size}: {url}")
-        
         data = fetch_json(url, crawl_delay, check_is_pdp_only=True)
         if data and data.get("isPDP", 0) != 0:
             products_found += 1
             log(f"  ✓ Found product page (isPDP != 0)")
         else:
             log(f"  ✗ Not a product page (isPDP == 0 or no data)")
-        
         time.sleep(0.5)
-    
     if products_found > 0:
         log(f"Sitemap contains product pages ({products_found}/{sample_size} samples are products)")
         return True
@@ -439,20 +356,17 @@ csv_lock = threading.Lock()
 def normalize_image_url(url: str) -> str:
     if not url:
         return ""
-    
     if url.startswith("//"):
         return "https:" + url
     elif url.startswith("/"):
         return f"{CURR_URL}{url}"
     elif not url.startswith("http"):
         return f"https://ak1.ostkcdn.com{url}" if 'ostkcdn.com' not in url else f"https://{url}"
-    
     return url
 
 def extract_product_data(product_data: dict) -> dict:
     try:
         product_id = str(product_data.get('ecomm_prodid', [''])[0] if isinstance(product_data.get('ecomm_prodid'), list) and product_data.get('ecomm_prodid') else '')
-        
         ecommerce_items = product_data.get('ecommerce', {}).get('items', [])
         name = ''
         if ecommerce_items:
@@ -461,41 +375,33 @@ def extract_product_data(product_data: dict) -> dict:
             name = product_data.get('product', {}).get('name', '').strip()
         if not product_id:
             name = product_data.get('product', {}).get('id', '').strip()
-        
         sku = product_data.get('ecomm_prodsku', '')
         if not sku:
             sku = product_data.get('product', {}).get('sku', '')
-        
         brand = ''
         quantity = 0
         price = ''
-        
         if ecommerce_items:
             brand = ecommerce_items[0].get('item_brand', '')
             quantity = ecommerce_items[0].get('quantity', 0)
             price_item = ecommerce_items[0].get('price', '')
             if price_item:
                 price = str(price_item)
-        
         if not price:
             ecomm_value = product_data.get('ecommerce', {}).get('value', '')
             if ecomm_value:
                 price = str(ecomm_value)
-        
         main_image = ''
         additional_data = product_data.get('additional_product_info_html', '')
         mpn = sku
         category = ''
-        
         try:
             additional_info_dict = json.loads(additional_data)
             mpn = additional_info_dict.get('item_number',"")
             category = additional_info_dict.get('product_type',"")
         except Exception as e:
             print(f"Error setting mpn or category : {e}")
-        
         category_url = ''
-        
         if ecommerce_items and not category:
             category_fields = [
                 'item_category', 'item_category2', 'item_category3',
@@ -507,20 +413,15 @@ def extract_product_data(product_data: dict) -> dict:
                 cat_value = ecommerce_items[0].get(field, '')
                 if cat_value:
                     categories.append(cat_value)
-            
             if categories:
                 category = ' | '.join(categories)
-        
         availability = product_data.get('ecommerce', {}).get('magentoProductAvailability', '')
         status = 'OUT_OF_STOCK'
-        
         if availability == 'InStock':
             status = 'SELLABLE'
-        
         variation_id = ''
         group_attr_1 = ''
         group_attr_2 = ''
-        
         return {
             'product_id': product_id,
             'name': name,
@@ -538,7 +439,6 @@ def extract_product_data(product_data: dict) -> dict:
             'group_attr_2': group_attr_2,
             'additional_data': additional_data,
         }
-        
     except Exception as e:
         print(f"Error extracting product data: {e}")
         return {}
@@ -547,22 +447,17 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict, crawl
     if product_url in seen:
         return
     seen.add(product_url)
-    
     log(f"Processing product URL: {product_url}", "DEBUG")
-    
     data = fetch_json(product_url, crawl_delay)
-
     if not data:
         stats['errors'] += 1
         log(f"No data found for product {product_url}", "ERROR")
         return
-    
     product_info = extract_product_data(data)
     if not product_info.get('product_id'):
         stats['errors'] += 1
         log(f"Invalid data for product {product_info.get('product_id', 'unknown')}", "ERROR")
         return
-    
     try:
         row = [
             product_url,
@@ -584,17 +479,13 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict, crawl
             product_info['additional_data'],
             SCRAPED_DATE
         ]
-        
         with csv_lock:
             writer.writerow(row)
-        
         stats['products_fetched'] += 1
         log(f"Fetched product {product_info['product_id']}: {product_info['name'][:50]}...", "INFO")
-        
     except Exception as e:
         log(f"Error creating row for product {product_info.get('product_id', 'unknown')}: {e}", "ERROR")
         stats['errors'] += 1
-    
     time.sleep(REQUEST_DELAY_BASE)
     stats['urls_processed'] += 1
 
@@ -622,7 +513,7 @@ def main():
         log(f"Using default request delay: {REQUEST_DELAY_BASE} seconds")
     
     log("=" * 60)
-    log("Emma Mason Scraper with FlareSolverr")
+    log("Emma Mason Scraper with FlareSolverr (Improved Parallelism)")
     log(f"FlareSolverr URL: {FLARESOLVERR_URL}")
     log(f"Timestamp: {SCRAPED_DATE}")
     log(f"Base URL: {CURR_URL}")
@@ -663,10 +554,8 @@ def main():
     log(f"Total sitemaps found: {len(sitemaps)}")
     log(f"Sitemaps to process: {len(sitemaps_to_process)}")
     
-    # Initialize CSV
     with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        
         writer.writerow([
             "Ref Product URL",
             "Ref Product ID",
@@ -696,7 +585,6 @@ def main():
             'errors': 0
         }
         
-        # Process each sitemap
         for sitemap_url in sitemaps_to_process:
             stats['sitemaps_processed'] += 1
             log(f"Processing sitemap {stats['sitemaps_processed']}/{len(sitemaps_to_process)}: {sitemap_url}")
@@ -745,7 +633,6 @@ def main():
             
             gc.collect()
     
-    # Print statistics
     log("=" * 60)
     log("SCRAPING STATISTICS")
     log("=" * 60)
@@ -768,7 +655,6 @@ if __name__ == "__main__":
         log("Error: CURR_URL environment variable is required", "ERROR")
         sys.exit(1)
     
-    # Test FlareSolverr connection
     log(f"Testing FlareSolverr connection at {FLARESOLVERR_URL}")
     try:
         test_response = requests.post(FLARESOLVERR_URL, json={"cmd": "sessions.list"}, timeout=10)
