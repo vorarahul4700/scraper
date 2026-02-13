@@ -353,6 +353,41 @@ def check_sitemap_contains_products(sitemap_url: str, crawl_delay=None) -> bool:
 
 csv_lock = threading.Lock()
 
+def check_robots_txt():
+    """Check robots.txt for crawl delays and sitemap location"""
+    robots_url = f"{CURR_URL}/robots.txt"
+    log(f"Checking robots.txt: {robots_url}")
+    
+    content, status = flaresolverr_session.fetch(robots_url)
+    if content and status == 200:
+        lines = content.split('\n')
+        crawl_delay = None
+        sitemap_url = None
+        
+        for line in lines:
+            line = line.strip()
+            if line.lower().startswith('sitemap:'):
+                parts = line.split(':', 1)
+                if len(parts) > 1:
+                    potential_url = parts[1].strip()
+                    if potential_url.startswith('http'):
+                        sitemap_url = potential_url
+                        log(f"Found valid sitemap in robots.txt: {sitemap_url}")
+            elif line.lower().startswith('crawl-delay:'):
+                try:
+                    parts = line.split(':', 1)
+                    if len(parts) > 1:
+                        crawl_delay = float(parts[1].strip())
+                        log(f"Found Crawl-delay: {crawl_delay} seconds")
+                except (ValueError, IndexError) as e:
+                    log(f"Error parsing crawl-delay: {e}")
+        
+        return crawl_delay, sitemap_url
+    
+    log("No robots.txt found or couldn't fetch it")
+    return None, None
+
+
 def normalize_image_url(url: str) -> str:
     if not url:
         return ""
