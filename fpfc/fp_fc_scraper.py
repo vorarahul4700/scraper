@@ -600,6 +600,7 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict, crawl
                             var_product_info.get('category_url', ''),
                             var_product_info.get('brand', ''),
                             var_product_info.get('name', ''),
+                            active_name,
                             var_product_info.get('sku', ''),
                             var_product_info.get('mpn', ''),
                             '',  # empty column
@@ -641,6 +642,7 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict, crawl
                 product_info.get('category_url', ''),
                 product_info.get('brand', ''),
                 product_info.get('name', ''),
+                '',#set includes name
                 product_info.get('sku', ''),
                 product_info.get('mpn', ''),
                 '',  # empty column
@@ -731,6 +733,7 @@ def main():
                 "Ref Category URL",
                 "Ref Brand Name",
                 "Ref Product Name",
+                "Set Includes Name"
                 "Ref SKU",
                 "Ref MPN",
                 "Ref GTIN",
