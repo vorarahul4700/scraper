@@ -623,8 +623,6 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict, crawl
                         log(f"Error writing row for variation: {e}", "ERROR")
                         stats['errors'] += 1
 
-                    time.sleep(REQUEST_DELAY_BASE)
-
                 # After loop: warn about missing variations
                 missing = expected_names - processed_names
                 if missing:
@@ -662,8 +660,6 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict, crawl
         except Exception as e:
             log(f"Failed to extract/write original product info: {e}", "ERROR")
             stats['errors'] += 1
-
-    time.sleep(REQUEST_DELAY_BASE)
     stats['urls_processed'] += 1
 
 # ================= MAIN =================
@@ -733,7 +729,7 @@ def main():
                 "Ref Category URL",
                 "Ref Brand Name",
                 "Ref Product Name",
-                "Set Includes Name"
+                "Set Includes Name",
                 "Ref SKU",
                 "Ref MPN",
                 "Ref GTIN",
@@ -852,6 +848,7 @@ def main():
             "Ref Category URL",
             "Ref Brand Name",
             "Ref Product Name",
+            "Set Includes Name",
             "Ref SKU",
             "Ref MPN",
             "Ref GTIN",
