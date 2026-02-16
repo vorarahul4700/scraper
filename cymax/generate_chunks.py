@@ -69,6 +69,10 @@ def get_thread_flaresolverr_url() -> str:
         idx = _endpoint_assign_counter % len(FLARESOLVERR_URLS)
         _endpoint_assign_counter += 1
     _thread_local.flaresolverr_url = FLARESOLVERR_URLS[idx]
+    log(
+        f"Thread {threading.get_ident()} assigned FlareSolverr endpoint {_thread_local.flaresolverr_url}",
+        "DEBUG",
+    )
     return _thread_local.flaresolverr_url
 
 
@@ -184,6 +188,14 @@ def main() -> None:
     if CHUNK_SIZE <= 0:
         raise ValueError("CHUNK_SIZE must be > 0")
 
+    log(
+        f"Planner config => max_sitemaps={MAX_SITEMAPS}, chunk_size={CHUNK_SIZE}, "
+        f"max_workers={MAX_WORKERS}, max_urls_per_sitemap={MAX_URLS_PER_SITEMAP}"
+    )
+    log(f"FlareSolverr endpoints available: {len(FLARESOLVERR_URLS)}")
+    for i, endpoint in enumerate(FLARESOLVERR_URLS, 1):
+        log(f"  [{i}] {endpoint}", "DEBUG")
+
     sitemap_index_url = get_sitemap_index_url()
     log(f"Loading sitemap index: {sitemap_index_url}")
     root = load_xml(sitemap_index_url)
@@ -212,8 +224,12 @@ def main() -> None:
 
     with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(1, len(sitemap_locs)))) as ex:
         futures = [ex.submit(process_one, s) for s in sitemap_locs]
+        completed = 0
+        total_sitemaps = len(futures)
         for f in as_completed(futures):
             all_urls.extend(f.result())
+            completed += 1
+            log(f"Sitemap progress: {completed}/{total_sitemaps} processed")
 
     # Unique preserving order
     unique_urls = list(dict.fromkeys(all_urls))
@@ -239,7 +255,13 @@ def main() -> None:
                 "total_urls": total,
             }
         )
+        log(
+            f"Chunk planned: id={i}, offset={offset}, limit={limit}, "
+            f"remaining={max(total - (offset + limit), 0)}",
+            "DEBUG",
+        )
     log(f"Generated chunks: {len(chunks)}")
+    log(f"Total products/urls available for chunks: {total}")
 
     matrix_json = json.dumps(chunks)
     github_output = os.getenv("GITHUB_OUTPUT")
