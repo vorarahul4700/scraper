@@ -5,8 +5,7 @@ import sys
 import gc
 import random
 import threading
-import gzip
-import cloudscraper
+import requests
 from typing import Optional, Tuple
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
@@ -14,6 +13,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 import re
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # ================= ENV =================
 
@@ -26,6 +27,16 @@ MAX_PRODUCTS = int(os.getenv("MAX_PRODUCTS", "1000"))
 # Workers and delays
 MAX_WORKERS = min(int(os.getenv("MAX_WORKERS", "4")), 6)
 REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY", "0.5"))  # Low delay
+FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "http://localhost:8191/v1")
+FLARESOLVERR_URLS_RAW = os.getenv("FLARESOLVERR_URLS", "").strip()
+FLARESOLVERR_TIMEOUT = int(os.getenv("FLARESOLVERR_TIMEOUT", "60"))
+FLARESOLVERR_URLS = [
+    url.strip()
+    for url in FLARESOLVERR_URLS_RAW.split(",")
+    if url.strip()
+]
+if not FLARESOLVERR_URLS:
+    FLARESOLVERR_URLS = [FLARESOLVERR_URL]
 
 SITEMAP_INDEX = f"{CURR_URL}/sitemap.xml"
 OUTPUT_CSV = f"cymax_products_{SITEMAP_OFFSET}.csv"
@@ -33,70 +44,178 @@ SCRAPED_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 # ================= LOGGER =================
 
-def log(msg: str):
-    sys.stderr.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+def log(msg: str, level: str = "INFO"):
+    sys.stderr.write(f"[{time.strftime('%H:%M:%S')}] [{level}] {msg}\n")
     sys.stderr.flush()
 
-# ================= SIMPLIFIED REQUEST MANAGER =================
+# ================= THREAD-LOCAL FLARESOLVERR =================
+
+_thread_local = threading.local()
+_endpoint_assign_lock = threading.Lock()
+_endpoint_assign_counter = 0
+
+def get_thread_flaresolverr_url() -> str:
+    global _endpoint_assign_counter
+    if hasattr(_thread_local, "flaresolverr_url"):
+        return _thread_local.flaresolverr_url
+
+    with _endpoint_assign_lock:
+        idx = _endpoint_assign_counter % len(FLARESOLVERR_URLS)
+        _endpoint_assign_counter += 1
+
+    _thread_local.flaresolverr_url = FLARESOLVERR_URLS[idx]
+    log(
+        f"Thread {threading.get_ident()} assigned FlareSolverr endpoint {_thread_local.flaresolverr_url}",
+        "DEBUG",
+    )
+    return _thread_local.flaresolverr_url
+
+def get_flaresolverr_session() -> Tuple[requests.Session, dict]:
+    if not hasattr(_thread_local, "session"):
+        session = requests.Session()
+        adapter = HTTPAdapter(
+            pool_connections=MAX_WORKERS * 2,
+            pool_maxsize=MAX_WORKERS * 2,
+            max_retries=Retry(total=2, backoff_factor=0.5),
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        _thread_local.session = session
+        _thread_local.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Accept-Language": "en-US,en;q=0.9",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
+            "Referer": CURR_URL + "/",
+        }
+    return _thread_local.session, _thread_local.headers
+
+def get_flaresolverr_browser_session_id(session: requests.Session, flaresolverr_url: str) -> Optional[str]:
+    if hasattr(_thread_local, "flaresolverr_session_id"):
+        return _thread_local.flaresolverr_session_id
+
+    session_id = f"cymax-{threading.get_ident()}-{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
+    try:
+        resp = session.post(
+            flaresolverr_url,
+            json={"cmd": "sessions.create", "session": session_id},
+            timeout=30,
+        )
+        if resp.status_code == 200 and resp.json().get("status") == "ok":
+            _thread_local.flaresolverr_session_id = session_id
+            return session_id
+        log(f"Failed creating FlareSolverr session for thread {threading.get_ident()}: {resp.text}", "WARNING")
+    except Exception as e:
+        log(f"Failed creating FlareSolverr session for thread {threading.get_ident()}: {e}", "WARNING")
+    return None
+
+def flaresolverr_request(url: str, max_retries: int = 3) -> Optional[Tuple[str, int]]:
+    session, headers = get_flaresolverr_session()
+    flaresolverr_url = get_thread_flaresolverr_url()
+    flaresolverr_session_id = get_flaresolverr_browser_session_id(session, flaresolverr_url)
+
+    for attempt in range(max_retries):
+        try:
+            payload = {
+                "cmd": "request.get",
+                "url": url,
+                "maxTimeout": 120000,
+                "headers": headers,
+            }
+            if flaresolverr_session_id:
+                payload["session"] = flaresolverr_session_id
+
+            response = session.post(
+                flaresolverr_url,
+                json=payload,
+                timeout=FLARESOLVERR_TIMEOUT,
+            )
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("status") == "ok":
+                    solution = result.get("solution", {})
+                    content = solution.get("response", "")
+                    for cookie in solution.get("cookies", []):
+                        session.cookies.set(
+                            cookie.get("name"),
+                            cookie.get("value"),
+                            domain=cookie.get("domain"),
+                        )
+                    if "headers" in solution:
+                        for key, value in solution["headers"].items():
+                            if key.lower() not in ["content-length", "content-encoding", "transfer-encoding"]:
+                                headers[key] = value
+                    return content, 200
+                message = result.get("message", "")
+                if "session" in message.lower() and "exist" in message.lower():
+                    if hasattr(_thread_local, "flaresolverr_session_id"):
+                        delattr(_thread_local, "flaresolverr_session_id")
+                    flaresolverr_session_id = get_flaresolverr_browser_session_id(session, flaresolverr_url)
+
+            log(f"FlareSolverr attempt {attempt + 1} failed for {url}: {response.status_code}")
+        except requests.exceptions.Timeout:
+            log(f"FlareSolverr timeout on attempt {attempt + 1} for {url}")
+        except requests.exceptions.ConnectionError:
+            log(f"FlareSolverr connection error on attempt {attempt + 1} for {url}")
+        except Exception as e:
+            log(f"FlareSolverr error on attempt {attempt + 1} for {url}: {e}")
+
+        if attempt < max_retries - 1:
+            time.sleep((2 ** attempt) + random.uniform(0, 1))
+    return None, 0
+
 
 class RequestManager:
     def __init__(self):
-        # Use ONLY cloudscraper (curl_cffi causes issues)
-        self.scraper = cloudscraper.create_scraper(
-            browser={
-                'browser': 'chrome',
-                'platform': 'windows',
-                'mobile': False
-            },
-            delay=5
-        )
-        
-        # Minimal headers
-        self.scraper.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "gzip, deflate",
-            "Connection": "keep-alive",
-        })
-        
         self.request_count = 0
         self.last_request_time = 0
-        self.lock = threading.Lock()
-    
-    def _rate_limit(self):
-        """Minimal rate limiting"""
-        with self.lock:
-            current_time = time.time()
-            if self.request_count > 0:
-                elapsed = current_time - self.last_request_time
-                if elapsed < REQUEST_DELAY_BASE:
-                    time.sleep(REQUEST_DELAY_BASE - elapsed)
-            
-            self.last_request_time = time.time()
+        self.retry_delays = [1, 2, 4]
+        self._lock = threading.Lock()
+        self._thread_local = threading.local()
+
+    def _respect_rate_limit(self):
+        if REQUEST_DELAY_BASE <= 0:
+            return
+        if not hasattr(self._thread_local, "last_request_time"):
+            self._thread_local.last_request_time = 0.0
+
+        elapsed = time.time() - self._thread_local.last_request_time
+        if elapsed < REQUEST_DELAY_BASE:
+            time.sleep(REQUEST_DELAY_BASE - elapsed)
+        self._thread_local.last_request_time = time.time()
+
+        with self._lock:
             self.request_count += 1
-    
+
     def fetch(self, url: str, retry_count: int = 0) -> Optional[str]:
-        """Simple fetch with retries"""
-        for retry in range(3):  # Max 3 retries
-            try:
-                self._rate_limit()
-                response = self.scraper.get(url, timeout=30)
-                
-                if response.status_code == 200:
-                    return response.text
-                elif response.status_code == 404:
-                    return None
-                else:
-                    if retry < 2:
-                        time.sleep(1 * (retry + 1))
-                        continue
-                    return None
-            except Exception:
-                if retry < 2:
-                    time.sleep(1)
-                    continue
-                return None
+        if retry_count >= len(self.retry_delays):
+            log(f"Max retries exceeded for {url}")
+            return None
+
+        self._respect_rate_limit()
+        content, status = flaresolverr_request(url)
+
+        if content and status == 200:
+            return content
+
+        if status in [403, 429, 503]:
+            delay = self.retry_delays[retry_count] + random.uniform(0, 1)
+            log(f"HTTP {status} for {url}, retry {retry_count + 1} in {delay:.1f}s")
+            time.sleep(delay)
+            return self.fetch(url, retry_count + 1)
+        if status == 404:
+            return None
+        if status not in [0, 200]:
+            delay = self.retry_delays[retry_count]
+            time.sleep(delay)
+            return self.fetch(url, retry_count + 1)
         return None
 
 # Initialize global request manager
@@ -113,16 +232,8 @@ def load_xml(url: str) -> Optional[ET.Element]:
         return None
     try:
         return ET.fromstring(data)
-    except ET.ParseError:
-        # Some sitemap URLs are .xml.gz and require manual decompress.
-        if url.endswith(".gz"):
-            try:
-                response = request_manager.scraper.get(url, timeout=30)
-                if response.status_code == 200 and response.content:
-                    xml_bytes = gzip.decompress(response.content)
-                    return ET.fromstring(xml_bytes)
-            except Exception:
-                return None
+    except ET.ParseError as e:
+        log(f"XML parse error for {url}: {e}")
         return None
 
 def normalize_image(url: str) -> str:
@@ -223,7 +334,6 @@ def get_all_product_urls():
     # STEP 2: Load sitemap index
     log(f"\n📂 Loading sitemap index: {sitemap_index_url}")
     index_content = http_get(sitemap_index_url)
-    
     if not index_content:
         log("❌ Failed to load sitemap index")
         return []
