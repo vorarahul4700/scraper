@@ -117,6 +117,11 @@ def log(msg: str, level: str = "INFO"):
     sys.stderr.write(f"[{timestamp}] [{level}] {msg}\n")
     sys.stderr.flush()
 
+def sanitize_url_text(text: str) -> str:
+    clean = re.sub(r"<[^>]+>", " ", text or "")
+    m = re.search(r"https?://[^\s\"'<>]+", clean)
+    return m.group(0).strip() if m else ""
+
 
 def check_robots_txt():
     """Check robots.txt for crawl delays and sitemap location"""
@@ -134,7 +139,7 @@ def check_robots_txt():
             if line.lower().startswith('sitemap:'):
                 parts = line.split(':', 1)
                 if len(parts) > 1:
-                    potential_url = parts[1].strip()
+                    potential_url = sanitize_url_text(parts[1].strip())
                     if potential_url.startswith('http'):
                         sitemap_url = potential_url
                         log(f"Found valid sitemap in robots.txt: {sitemap_url}")
