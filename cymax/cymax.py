@@ -530,37 +530,34 @@ def parse_product_page(html, url):
 # ================= PRODUCT PROCESSING =================
 
 csv_lock = threading.Lock()
-success_count = 0
-fail_count = 0
+seen_lock = threading.Lock()
+stats_lock = threading.Lock()
 
-def process_product(url, writer, seen):
-    """Process a single product and write to CSV"""
-    global success_count, fail_count
-    
-    if url in seen:
-        return
-    
-    with csv_lock:
-        if url in seen:
+def process_product_data(product_url: str, writer, seen: set, stats: dict):
+    """FP-FC style processing flow with thread-safe seen/stats handling."""
+    with seen_lock:
+        if product_url in seen:
             return
-        seen.add(url)
+        seen.add(product_url)
     
     try:
-        html = http_get(url)
+        html = http_get(product_url)
         if not html:
-            with csv_lock:
-                fail_count += 1
+            with stats_lock:
+                stats["errors"] += 1
+                stats["urls_processed"] += 1
             return
         
-        product = parse_product_page(html, url)
+        product = parse_product_page(html, product_url)
         if not product or not product.get("product_id"):
-            with csv_lock:
-                fail_count += 1
+            with stats_lock:
+                stats["errors"] += 1
+                stats["urls_processed"] += 1
             return
         
         # Write to CSV
         row = [
-            url,                                    # Ref Product URL
+            product_url,                            # Ref Product URL
             product["product_id"],                  # Ref Product ID
             product["product_id"],                  # Ref Variant ID
             product["category"],                    # Ref Category
@@ -581,21 +578,30 @@ def process_product(url, writer, seen):
         
         with csv_lock:
             writer.writerow(row)
-            success_count += 1
             log(f"Processed product {product['product_id']} | {product['title'][:80]}")
-            
-        if success_count % 25 == 0:
-            log(f"✓ Processed: {success_count} | Failed: {fail_count} | Rate: {success_count/(time.time()-start_time if 'start_time' in globals() else 1):.1f}/s")
+        
+        with stats_lock:
+            stats["products_fetched"] += 1
+            stats["urls_processed"] += 1
+
+            if stats["urls_processed"] % 25 == 0:
+                elapsed = time.time() - start_time if 'start_time' in globals() else 1
+                rate = stats["products_fetched"] / elapsed if elapsed > 0 else 0
+                log(
+                    f"✓ Processed: {stats['products_fetched']} | "
+                    f"Failed: {stats['errors']} | Rate: {rate:.1f}/s"
+                )
         
     except Exception as e:
-        with csv_lock:
-            fail_count += 1
-        log(f"Error: {url[-50:]}... - {str(e)[:50]}")
+        with stats_lock:
+            stats["errors"] += 1
+            stats["urls_processed"] += 1
+        log(f"Error: {product_url[-50:]}... - {str(e)[:50]}")
 
 # ================= MAIN =================
 
 def main():
-    global start_time, success_count, fail_count
+    global start_time
     
     start_time = time.time()
     
@@ -679,6 +685,11 @@ def main():
         ])
         
         seen = set()
+        stats = {
+            "urls_processed": 0,
+            "products_fetched": 0,
+            "errors": 0,
+        }
         
         # Process with thread pool
         log(f"\n🚀 Starting processing with {MAX_WORKERS} workers...")
@@ -688,8 +699,8 @@ def main():
             
             for url in product_urls:
                 future = executor.submit(
-                    process_product,
-                    url, writer, seen
+                    process_product_data,
+                    url, writer, seen, stats
                 )
                 futures.append(future)
             
@@ -710,6 +721,8 @@ def main():
                     future.result()
                 except Exception as e:
                     log(f"Future error: {e}")
+                    with stats_lock:
+                        stats["errors"] += 1
     
     # Final summary
     elapsed = time.time() - start_time
@@ -718,14 +731,16 @@ def main():
     log("✅ SCRAPING COMPLETE")
     log("=" * 60)
     log(f"📁 Output: {OUTPUT_CSV}")
-    log(f"✅ Success: {success_count}")
-    log(f"❌ Failed: {fail_count}")
+    log(f"✅ Success: {stats['products_fetched']}")
+    log(f"❌ Failed: {stats['errors']}")
+    log(f"🔢 URLs processed: {stats['urls_processed']}")
     log(f"⏱️  Time: {elapsed:.1f}s")
-    log(f"⚡ Avg speed: {success_count/elapsed:.1f} products/sec")
+    avg_speed = (stats['products_fetched'] / elapsed) if elapsed > 0 else 0
+    log(f"⚡ Avg speed: {avg_speed:.1f} products/sec")
     log(f"📊 Total requests: {request_manager.request_count}")
     
     # Show sample
-    if success_count > 0:
+    if stats["products_fetched"] > 0:
         log("\n📋 Sample products:")
         try:
             with open(OUTPUT_CSV, 'r', encoding='utf-8') as f:

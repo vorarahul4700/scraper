@@ -5,16 +5,13 @@ import os
 import random
 import re
 import sys
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 from xml.etree import ElementTree as ET
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 
 CURR_URL = os.getenv("CURR_URL", "https://www.cymax.com").rstrip("/")
@@ -23,15 +20,9 @@ MAX_SITEMAPS = int(os.getenv("MAX_SITEMAPS", "13"))
 MAX_URLS_PER_SITEMAP = int(os.getenv("MAX_URLS_PER_SITEMAP", "0"))
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "50000"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))
-PLAN_MAX_WORKERS = int(os.getenv("PLAN_MAX_WORKERS", "20"))
-FS_RETRIES = int(os.getenv("FS_RETRIES", "2"))
 
 FLARESOLVERR_URL = os.getenv("FLARESOLVERR_URL", "http://localhost:8191/v1")
-FLARESOLVERR_URLS_RAW = os.getenv("FLARESOLVERR_URLS", "").strip()
-FLARESOLVERR_TIMEOUT = int(os.getenv("FLARESOLVERR_TIMEOUT", "120"))
-FLARESOLVERR_URLS = [u.strip() for u in FLARESOLVERR_URLS_RAW.split(",") if u.strip()]
-if not FLARESOLVERR_URLS:
-    FLARESOLVERR_URLS = [FLARESOLVERR_URL]
+FLARESOLVERR_TIMEOUT = int(os.getenv("FLARESOLVERR_TIMEOUT", "60"))
 
 URL_LIST_FILE = "cymax_chunk_urls.csv"
 
@@ -59,128 +50,129 @@ def extract_xml_payload(raw: str) -> str:
     return text
 
 
-_thread_local = threading.local()
-_endpoint_assign_lock = threading.Lock()
-_endpoint_assign_counter = 0
-
-
-def get_thread_flaresolverr_url() -> str:
-    global _endpoint_assign_counter
-    if hasattr(_thread_local, "flaresolverr_url"):
-        return _thread_local.flaresolverr_url
-    with _endpoint_assign_lock:
-        idx = _endpoint_assign_counter % len(FLARESOLVERR_URLS)
-        _endpoint_assign_counter += 1
-    _thread_local.flaresolverr_url = FLARESOLVERR_URLS[idx]
-    log(
-        f"Thread {threading.get_ident()} assigned FlareSolverr endpoint {_thread_local.flaresolverr_url}",
-        "DEBUG",
-    )
-    return _thread_local.flaresolverr_url
-
-
-def get_session() -> Tuple[requests.Session, Dict[str, str]]:
-    if not hasattr(_thread_local, "session"):
-        session = requests.Session()
-        adapter = HTTPAdapter(
-            pool_connections=MAX_WORKERS * 2,
-            pool_maxsize=MAX_WORKERS * 2,
-            max_retries=Retry(total=2, backoff_factor=0.5),
-        )
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        _thread_local.session = session
-        _thread_local.headers = {
+class FlareSolverrSession:
+    def __init__(self):
+        self.session = requests.Session()
+        self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
             "Accept-Language": "en-US,en;q=0.9",
+            "DNT": "1",
             "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
             "Referer": CURR_URL + "/",
         }
-    return _thread_local.session, _thread_local.headers
+
+    def flaresolverr_request(self, url: str, max_retries: int = 3) -> Optional[Tuple[str, int]]:
+        for attempt in range(max_retries):
+            try:
+                payload = {
+                    "cmd": "request.get",
+                    "url": url,
+                    "maxTimeout": 60000,
+                    "session": None,
+                    "headers": self.headers,
+                }
+                response = self.session.post(
+                    FLARESOLVERR_URL,
+                    json=payload,
+                    timeout=FLARESOLVERR_TIMEOUT,
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+                    if result.get("status") == "ok":
+                        solution = result.get("solution", {})
+                        content = solution.get("response", "")
+                        for cookie in solution.get("cookies", []):
+                            self.session.cookies.set(
+                                cookie.get("name"),
+                                cookie.get("value"),
+                                domain=cookie.get("domain"),
+                            )
+                        return content, 200
+
+                log(f"FlareSolverr attempt {attempt + 1} failed for {url}: {response.status_code}", "DEBUG")
+            except requests.exceptions.Timeout:
+                log(f"FlareSolverr timeout on attempt {attempt + 1} for {url}", "WARNING")
+            except requests.exceptions.ConnectionError:
+                log(f"FlareSolverr connection error on attempt {attempt + 1} for {url}", "WARNING")
+            except Exception as e:
+                log(f"FlareSolverr error on attempt {attempt + 1} for {url}: {e}", "WARNING")
+
+            if attempt < max_retries - 1:
+                time.sleep((2 ** attempt) + random.uniform(0, 1))
+        return None, 0
+
+    def fetch(self, url: str) -> Optional[Tuple[str, int]]:
+        return self.flaresolverr_request(url)
 
 
-def get_browser_session_id(session: requests.Session, fs_url: str) -> Optional[str]:
-    if hasattr(_thread_local, "flaresolverr_session_id"):
-        return _thread_local.flaresolverr_session_id
-    session_id = f"cymax-plan-{threading.get_ident()}-{int(time.time()*1000)}-{random.randint(1000, 9999)}"
-    try:
-        resp = session.post(fs_url, json={"cmd": "sessions.create", "session": session_id}, timeout=30)
-        if resp.status_code == 200 and resp.json().get("status") == "ok":
-            _thread_local.flaresolverr_session_id = session_id
-            return session_id
-    except Exception:
-        return None
+flaresolverr_session = FlareSolverrSession()
+
+
+def check_robots_txt():
+    robots_url = f"{CURR_URL}/robots.txt"
+    log(f"Checking robots.txt: {robots_url}")
+    content, status = flaresolverr_session.fetch(robots_url)
+    if content and status == 200:
+        sitemap_url = None
+        for line in content.split("\n"):
+            line = line.strip()
+            if line.lower().startswith("sitemap:"):
+                parts = line.split(":", 1)
+                if len(parts) > 1:
+                    candidate = sanitize_url_text(parts[1].strip())
+                    if candidate.startswith("http"):
+                        sitemap_url = candidate
+                        log(f"Found sitemap in robots.txt: {sitemap_url}")
+                        break
+        return sitemap_url
     return None
 
 
-def fs_get(url: str, retries: int = FS_RETRIES) -> Optional[str]:
-    session, headers = get_session()
-    fs_url = get_thread_flaresolverr_url()
-    session_id = get_browser_session_id(session, fs_url)
-    for attempt in range(retries):
-        try:
-            payload = {"cmd": "request.get", "url": url, "maxTimeout": 120000, "headers": headers}
-            if session_id:
-                payload["session"] = session_id
-            resp = session.post(fs_url, json=payload, timeout=FLARESOLVERR_TIMEOUT)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("status") == "ok":
-                    sol = data.get("solution", {})
-                    return sol.get("response", "")
-        except Exception:
-            pass
-        if attempt < retries - 1:
-            time.sleep((2 ** attempt) + random.uniform(0, 1))
+def fetch_xml(url: str) -> Optional[str]:
+    content, status = flaresolverr_session.fetch(url)
+    if content and status == 200:
+        return content
     return None
-
-
-def load_xml(url: str) -> Optional[ET.Element]:
-    text = fs_get(url)
-    if not text:
-        return None
-    try:
-        return ET.fromstring(extract_xml_payload(text))
-    except ET.ParseError:
-        return None
 
 
 def extract_locs(root: ET.Element) -> List[str]:
     ns = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-    elems = root.findall(".//ns:loc", ns) or root.findall(".//loc")
-    return [e.text.strip() for e in elems if e.text and e.text.strip()]
+    locs = root.findall(".//ns:loc", ns) or root.findall(".//loc")
+    return [loc.text.strip() for loc in locs if loc.text and loc.text.strip()]
 
 
-def get_sitemap_index_url() -> str:
-    robots = fs_get(f"{CURR_URL}/robots.txt")
-    if robots:
-        for line in robots.splitlines():
-            if line.lower().startswith("sitemap:"):
-                candidate = sanitize_url_text(line.split(":", 1)[1].strip())
-                if candidate.startswith("http"):
-                    log(f"Found sitemap in robots.txt: {candidate}")
-                    return candidate
-    return SITEMAP_INDEX
-
-
-def parse_sitemap(sitemap_url: str, depth: int = 0, max_depth: int = 10) -> Tuple[List[str], List[str]]:
+def collect_urls_from_sitemap(sm_url: str, depth: int = 0, max_depth: int = 6) -> List[str]:
     if depth > max_depth:
-        return [], []
-    root = load_xml(sitemap_url)
-    if root is None:
-        return [], []
+        return []
+    xml = fetch_xml(sm_url)
+    if not xml:
+        return []
+    try:
+        root = ET.fromstring(extract_xml_payload(xml))
+    except ET.ParseError:
+        return []
+
     locs = extract_locs(root)
     if not locs:
-        return [], []
+        return []
 
     tag = root.tag.lower()
     nested = [u for u in locs if u.lower().endswith(".xml") or u.lower().endswith(".xml.gz")]
     if "sitemapindex" in tag or (nested and len(nested) == len(locs)):
-        return [], nested
+        out: List[str] = []
+        for n in nested:
+            out.extend(collect_urls_from_sitemap(n, depth + 1, max_depth))
+        return out
 
-    urls = [u for u in locs if ".htm" in u and not any(x in u for x in ["--C", "--PC", "sitemap", "robots"])]
-    return urls, []
+    return [u for u in locs if ".htm" in u and not any(x in u for x in ["--C", "--PC", "sitemap", "robots"])]
 
 
 def main() -> None:
@@ -189,77 +181,54 @@ def main() -> None:
 
     log(
         f"Planner config => max_sitemaps={MAX_SITEMAPS}, chunk_size={CHUNK_SIZE}, "
-        f"max_workers={MAX_WORKERS}, plan_workers={PLAN_MAX_WORKERS}, "
-        f"max_urls_per_sitemap={MAX_URLS_PER_SITEMAP}, fs_retries={FS_RETRIES}"
+        f"max_workers={MAX_WORKERS}, max_urls_per_sitemap={MAX_URLS_PER_SITEMAP}"
     )
-    log(f"FlareSolverr endpoints available: {len(FLARESOLVERR_URLS)}")
-    for i, endpoint in enumerate(FLARESOLVERR_URLS, 1):
-        log(f"  [{i}] {endpoint}", "DEBUG")
+    log(f"FlareSolverr endpoint: {FLARESOLVERR_URL}")
 
-    sitemap_index_url = get_sitemap_index_url()
-    log(f"Loading sitemap index: {sitemap_index_url}")
-    root = load_xml(sitemap_index_url)
-    if root is None:
-        raise RuntimeError(f"Failed loading sitemap index: {sitemap_index_url}")
+    robots_sitemap = check_robots_txt()
+    sitemap_index = robots_sitemap if robots_sitemap else SITEMAP_INDEX
+    log(f"Loading sitemap index: {sitemap_index}")
+
+    index_xml = fetch_xml(sitemap_index)
+    if not index_xml:
+        raise RuntimeError(f"Failed to fetch sitemap index: {sitemap_index}")
+    try:
+        root = ET.fromstring(extract_xml_payload(index_xml))
+    except ET.ParseError as e:
+        raise RuntimeError(f"Failed to parse sitemap index XML: {e}") from e
 
     sitemap_locs = extract_locs(root)
     if not sitemap_locs:
         raise RuntimeError("No sitemaps found in index")
+
     if MAX_SITEMAPS > 0:
         sitemap_locs = sitemap_locs[:MAX_SITEMAPS]
     log(f"Top-level sitemaps selected: {len(sitemap_locs)}")
 
     all_urls: List[str] = []
-    visited_sitemaps = set()
-    frontier: List[Tuple[str, int]] = [(s, 0) for s in sitemap_locs]
-    processed_sitemaps = 0
 
-    with ThreadPoolExecutor(max_workers=min(PLAN_MAX_WORKERS, max(1, len(sitemap_locs) * 2))) as ex:
-        while frontier:
-            batch = []
-            next_frontier: List[Tuple[str, int]] = []
-            for sm_url, depth in frontier:
-                if sm_url in visited_sitemaps:
-                    continue
-                visited_sitemaps.add(sm_url)
-                batch.append((sm_url, depth))
+    def process_sitemap(sm_url: str) -> List[str]:
+        urls = collect_urls_from_sitemap(sm_url, 0, 6)
+        if MAX_URLS_PER_SITEMAP > 0 and len(urls) > MAX_URLS_PER_SITEMAP:
+            urls = urls[:MAX_URLS_PER_SITEMAP]
+        log(f"Sitemap done: {sm_url} -> {len(urls)} urls")
+        return urls
 
-            if not batch:
-                break
+    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(1, len(sitemap_locs)))) as ex:
+        futures = [ex.submit(process_sitemap, sm) for sm in sitemap_locs]
+        completed = 0
+        for fut in as_completed(futures):
+            all_urls.extend(fut.result())
+            completed += 1
+            log(f"Sitemap progress: {completed}/{len(futures)} processed")
 
-            futures = {
-                ex.submit(parse_sitemap, sm_url, depth, 10): (sm_url, depth)
-                for sm_url, depth in batch
-            }
-            for f in as_completed(futures):
-                sm_url, depth = futures[f]
-                try:
-                    urls, nested = f.result()
-                except Exception as e:
-                    log(f"Failed parsing sitemap {sm_url}: {e}", "WARNING")
-                    urls, nested = [], []
-                if MAX_URLS_PER_SITEMAP > 0 and len(urls) > MAX_URLS_PER_SITEMAP:
-                    urls = urls[:MAX_URLS_PER_SITEMAP]
-                all_urls.extend(urls)
-                for n in nested:
-                    if n not in visited_sitemaps:
-                        next_frontier.append((n, depth + 1))
-                processed_sitemaps += 1
-                if processed_sitemaps % 10 == 0 or processed_sitemaps == len(visited_sitemaps):
-                    log(
-                        f"Sitemap progress: processed={processed_sitemaps}, "
-                        f"queued_next={len(next_frontier)}, urls_collected={len(all_urls)}"
-                    )
-            frontier = next_frontier
-
-    # Unique preserving order
     unique_urls = list(dict.fromkeys(all_urls))
     total = len(unique_urls)
     log(f"Total unique product urls: {total}")
     if total == 0:
         raise RuntimeError("No product urls discovered")
 
-    with open(URL_LIST_FILE, "w", encoding="utf-8", newline="") as f:
+    with open(URL_LIST_FILE, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["url"])
         for u in unique_urls:
@@ -278,13 +247,9 @@ def main() -> None:
                 "total_urls": total,
             }
         )
-        log(
-            f"Chunk planned: id={i}, offset={offset}, limit={limit}, "
-            f"remaining={max(total - (offset + limit), 0)}",
-            "DEBUG",
-        )
+        log(f"Chunk planned: id={i}, offset={offset}, limit={limit}", "DEBUG")
+
     log(f"Generated chunks: {len(chunks)}")
-    log(f"Total products/urls available for chunks: {total}")
 
     matrix_json = json.dumps(chunks)
     github_output = os.getenv("GITHUB_OUTPUT")
