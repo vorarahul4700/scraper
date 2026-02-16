@@ -48,6 +48,27 @@ def log(msg: str, level: str = "INFO"):
     sys.stderr.write(f"[{time.strftime('%H:%M:%S')}] [{level}] {msg}\n")
     sys.stderr.flush()
 
+def sanitize_url_text(text: str) -> str:
+    if not text:
+        return ""
+    # Remove HTML tags/noise and extract first URL token.
+    clean = re.sub(r"<[^>]+>", " ", text)
+    match = re.search(r"https?://[^\s\"'<>]+", clean)
+    return match.group(0).strip() if match else ""
+
+def extract_xml_payload(raw: str) -> str:
+    if not raw:
+        return ""
+    text = raw.strip()
+    # Handle HTML wrappers around XML, e.g. <pre>...</pre>.
+    for root_tag in ("sitemapindex", "urlset"):
+        start_idx = text.find(f"<{root_tag}")
+        end_tag = f"</{root_tag}>"
+        end_idx = text.rfind(end_tag)
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            return text[start_idx:end_idx + len(end_tag)]
+    return text
+
 # ================= THREAD-LOCAL FLARESOLVERR =================
 
 _thread_local = threading.local()
@@ -231,7 +252,8 @@ def load_xml(url: str) -> Optional[ET.Element]:
     if not data:
         return None
     try:
-        return ET.fromstring(data)
+        xml_text = extract_xml_payload(data)
+        return ET.fromstring(xml_text)
     except ET.ParseError as e:
         log(f"XML parse error for {url}: {e}")
         return None
@@ -325,7 +347,7 @@ def get_all_product_urls():
             if line.lower().startswith('sitemap:'):
                 parts = line.split(':', 1)
                 if len(parts) > 1:
-                    potential_url = parts[1].strip()
+                    potential_url = sanitize_url_text(parts[1].strip())
                     if potential_url.startswith('http'):
                         sitemap_index_url = potential_url
                         log(f"✓ Found sitemap in robots.txt: {sitemap_index_url}")
