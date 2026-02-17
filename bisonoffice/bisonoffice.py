@@ -18,7 +18,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urlunparse, urlencode, parse_qs, urljoin
 import urllib3
-from utils.logger import Logger
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -559,7 +558,6 @@ class BisonofficeScraper:
                 unique.append(item)
 
         self.log(f"Merged {len(unique)} products/items", "DEBUG")
-        Logger.write(unique, 'merged_items')
 
         return unique
 
