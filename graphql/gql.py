@@ -99,7 +99,7 @@ class RequestManager:
         if self.request_count % 20 == 0:
             long_pause = random.uniform(8, 15)
             log(f"Taking longer pause after {self.request_count} requests: {long_pause:.1f}s")
-            time.sleep(long_pelay)
+            time.sleep(long_pause)
     
     def _fetch_with_cloudscraper(self, url: str, crawl_delay=None) -> Optional[Tuple[str, int]]:
         """Use cloudscraper for Cloudflare-protected pages"""
