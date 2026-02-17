@@ -143,7 +143,7 @@ class WalmartScraper:
     # ============================================================
 
     def load_xml(self, url: str) -> Optional[ET.Element]:
-        """Fetch and parse an XML sitemap. Falls back to regex on parse error."""
+        """Fetch and parse an XML sitemap. Strips <script/> before parsing."""
         data = None
         for attempt in range(3):
             try:
@@ -158,22 +158,18 @@ class WalmartScraper:
             self.log(f"Failed to load XML from {url}", "ERROR")
             return None
 
+        # Walmart injects <script/> into the sitemap index which breaks XML parsing
+        # Simply strip it out before parsing — same as ovr.py approach
+        data = re.sub(r'<script[^>]*/>', '', data)
+        data = re.sub(r'<script[^>]*>.*?</script>', '', data, flags=re.DOTALL)
+
         try:
             if "<?xml" not in data[:100]:
                 data = '<?xml version="1.0" encoding="UTF-8"?>\n' + data
             return ET.fromstring(data)
         except ET.ParseError as e:
             self.log(f"XML parse error for {url}: {e}", "ERROR")
-            try:
-                root = ET.Element("urlset")
-                for url_text in re.findall(r'<loc>(https?://[^<]+)</loc>', data):
-                    url_elem = ET.SubElement(root, "url")
-                    loc_elem = ET.SubElement(url_elem, "loc")
-                    loc_elem.text = url_text
-                return root
-            except Exception as e2:
-                self.log(f"Regex extraction failed: {e2}", "ERROR")
-                return None
+            return None
 
     def get_child_sitemaps(self, index_url: str) -> List[str]:
         """Parse sitemap index and return list of child sitemap URLs."""
@@ -185,10 +181,13 @@ class WalmartScraper:
         for path in [".//ns:sitemap/ns:loc", ".//sitemap/loc", ".//loc"]:
             elements = index.findall(path, ns) if "ns:" in path else index.findall(path)
             if elements:
-                return [e.text.strip() for e in elements if e.text]
+                sitemaps = [e.text.strip() for e in elements if e.text]
+                if sitemaps:
+                    self.log(f"Found {len(sitemaps)} child sitemaps", "INFO")
+                    return sitemaps
 
-        self.log("No child sitemaps found; using index as product sitemap", "WARNING")
-        return [index_url]
+        self.log("No child sitemaps found", "WARNING")
+        return []
 
     def get_product_urls(self, sitemap_url: str) -> List[str]:
         """Parse a product sitemap and return only Walmart /ip/ URLs."""
