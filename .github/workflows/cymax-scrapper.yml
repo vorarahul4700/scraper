@@ -58,13 +58,16 @@ jobs:
 
           BASE_PORT=8191
           URLS=""
+          HEALTHY_INSTANCES=0
 
           echo "Starting $INSTANCES FlareSolverr instances..."
           for ((i=0; i<INSTANCES; i++)); do
             PORT=$((BASE_PORT + i))
             NAME="flaresolverr_${PORT}"
             echo "Starting $NAME on localhost:$PORT"
-            docker run -d --name "$NAME" --cap-add=SYS_ADMIN -p "${PORT}:8191" ghcr.io/flaresolverr/flaresolverr:latest >/dev/null
+            if ! docker run -d --name "$NAME" --cap-add=SYS_ADMIN -p "${PORT}:8191" ghcr.io/flaresolverr/flaresolverr:latest >/dev/null; then
+              echo "⚠ Failed to launch $NAME, skipping"
+            fi
           done
 
           echo "Waiting for all FlareSolverr instances..."
@@ -87,9 +90,10 @@ jobs:
             done
 
             if [ "$READY" -ne 1 ]; then
-              echo "❌ $NAME failed to start"
+              echo "⚠ $NAME failed to start, skipping"
               docker logs "$NAME" || true
-              exit 1
+              docker rm -f "$NAME" >/dev/null 2>&1 || true
+              continue
             fi
 
             if [ -z "$URLS" ]; then
@@ -97,11 +101,18 @@ jobs:
             else
               URLS="$URLS,$URL"
             fi
+            HEALTHY_INSTANCES=$((HEALTHY_INSTANCES + 1))
           done
 
-          echo "instances=$INSTANCES" >> $GITHUB_OUTPUT
+          if [ "$HEALTHY_INSTANCES" -lt 1 ]; then
+            echo "❌ No FlareSolverr instances are healthy"
+            exit 1
+          fi
+
+          FIRST_URL="${URLS%%,*}"
+          echo "instances=$HEALTHY_INSTANCES" >> $GITHUB_OUTPUT
           echo "urls=$URLS" >> $GITHUB_OUTPUT
-          echo "first_url=http://localhost:8191/v1" >> $GITHUB_OUTPUT
+          echo "first_url=$FIRST_URL" >> $GITHUB_OUTPUT
           echo "FlareSolverr URL list: $URLS"
 
       - name: Set up Python
@@ -157,13 +168,16 @@ jobs:
 
           BASE_PORT=8191
           URLS=""
+          HEALTHY_INSTANCES=0
 
           echo "Starting $INSTANCES FlareSolverr instances..."
           for ((i=0; i<INSTANCES; i++)); do
             PORT=$((BASE_PORT + i))
             NAME="flaresolverr_${PORT}"
             echo "Starting $NAME on localhost:$PORT"
-            docker run -d --name "$NAME" --cap-add=SYS_ADMIN -p "${PORT}:8191" ghcr.io/flaresolverr/flaresolverr:latest >/dev/null
+            if ! docker run -d --name "$NAME" --cap-add=SYS_ADMIN -p "${PORT}:8191" ghcr.io/flaresolverr/flaresolverr:latest >/dev/null; then
+              echo "⚠ Failed to launch $NAME, skipping"
+            fi
           done
 
           echo "Waiting for all FlareSolverr instances..."
@@ -185,9 +199,10 @@ jobs:
             done
 
             if [ "$READY" -ne 1 ]; then
-              echo "❌ $NAME failed to start"
+              echo "⚠ $NAME failed to start, skipping"
               docker logs "$NAME" || true
-              exit 1
+              docker rm -f "$NAME" >/dev/null 2>&1 || true
+              continue
             fi
 
             if [ -z "$URLS" ]; then
@@ -195,11 +210,18 @@ jobs:
             else
               URLS="$URLS,$URL"
             fi
+            HEALTHY_INSTANCES=$((HEALTHY_INSTANCES + 1))
           done
 
-          echo "instances=$INSTANCES" >> $GITHUB_OUTPUT
+          if [ "$HEALTHY_INSTANCES" -lt 1 ]; then
+            echo "❌ No FlareSolverr instances are healthy"
+            exit 1
+          fi
+
+          FIRST_URL="${URLS%%,*}"
+          echo "instances=$HEALTHY_INSTANCES" >> $GITHUB_OUTPUT
           echo "urls=$URLS" >> $GITHUB_OUTPUT
-          echo "first_url=http://localhost:8191/v1" >> $GITHUB_OUTPUT
+          echo "first_url=$FIRST_URL" >> $GITHUB_OUTPUT
           echo "FlareSolverr URL list: $URLS"
 
       - name: Set up Python
