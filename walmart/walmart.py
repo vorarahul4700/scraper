@@ -162,7 +162,6 @@ class WalmartScraper:
         # Simply strip it out before parsing — same as ovr.py approach
         data = re.sub(r'<script[^>]*/>', '', data)
         data = re.sub(r'<script[^>]*>.*?</script>', '', data, flags=re.DOTALL)
-        self.log(data)
         try:
             if "<?xml" not in data[:100]:
                 data = '<?xml version="1.0" encoding="UTF-8"?>\n' + data
