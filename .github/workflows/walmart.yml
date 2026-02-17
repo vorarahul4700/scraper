@@ -48,7 +48,6 @@ jobs:
           PER_JOB=${{ github.event.inputs.sitemaps_per_job }}
           URL="${{ github.event.inputs.url }}"
 
-          # Default if 0
           if [ "$TOTAL" -eq 0 ]; then
             echo "total_sitemaps=0, defaulting to 10"
             TOTAL=10
@@ -87,11 +86,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip" 
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4
+          pip install requests beautifulsoup4 lxml
 
       - name: Run Walmart scraper
         env:
@@ -113,18 +113,28 @@ jobs:
           echo "REQUEST_DELAY        : $REQUEST_DELAY"
           echo "========================================"
 
-          python walmart/walmart_scraper_bulk.py
+          python walmart/walmart_scraper.py
 
           echo ""
           echo "Generated files:"
-          ls -la walmart_products_chunk_*.csv 2>/dev/null || echo "No CSV files generated"
+          ls -la media/output/scrapping/walmart/walmart_products_chunk_*.csv 2>/dev/null || echo "No CSV files generated"
+
 
       - name: Upload chunk artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: chunk_${{ matrix.offset }}
-          path: walmart_products_chunk_*.csv
+          path: media/output/scrapping/walmart/walmart_products_chunk_*.csv
           if-no-files-found: warn
+
+      - name: Upload failure log (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failures_${{ matrix.offset }}
+          path: media/output/scrapping/failure_csv/Walmart_failures.csv
+          if-no-files-found: ignore
 
   # ============================================================
   # JOB 3 — MERGE: combine all chunk CSVs into one final file
@@ -132,6 +142,7 @@ jobs:
   merge:
     needs: [plan, scrape]
     runs-on: ubuntu-latest
+    if: always()
 
     steps:
       - name: Download all chunk artifacts
@@ -175,8 +186,26 @@ jobs:
           FINAL_ROWS=$(tail -n +2 walmart_products_full.csv | wc -l)
           echo "Merged: $FINAL_ROWS rows from $FILE_COUNT chunk files"
 
-          echo "file_count=$FILE_COUNT"   >> $GITHUB_OUTPUT
-          echo "final_rows=$FINAL_ROWS"   >> $GITHUB_OUTPUT
+          echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+          echo "final_rows=$FINAL_ROWS" >> $GITHUB_OUTPUT
+
+      - name: Merge failure logs
+        if: always()
+        run: |
+          FAIL_FILES=$(find chunks -name "Walmart_failures.csv" 2>/dev/null)
+          if [ -z "$FAIL_FILES" ]; then
+            echo "No failure logs found."
+            exit 0
+          fi
+
+          FIRST=$(echo "$FAIL_FILES" | head -n 1)
+          head -n 1 "$FIRST" > walmart_failures_full.csv
+          for f in $FAIL_FILES; do
+            tail -n +2 "$f" | sed '/^$/d' >> walmart_failures_full.csv
+          done
+
+          FAIL_COUNT=$(tail -n +2 walmart_failures_full.csv | wc -l)
+          echo "Total failed URLs: $FAIL_COUNT"
 
       - name: Build output filename
         id: meta
@@ -239,5 +268,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: final_results
-          path: walmart_products_full.csv
+          path: |
+            walmart_products_full.csv
+            walmart_failures_full.csv
           retention-days: 7
