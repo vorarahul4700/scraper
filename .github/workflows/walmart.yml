@@ -113,7 +113,7 @@ jobs:
           echo "REQUEST_DELAY        : $REQUEST_DELAY"
           echo "========================================"
 
-          python walmart/walmart_scraper.py
+          python walmart/walmart.py
 
           echo ""
           echo "Generated files:"
