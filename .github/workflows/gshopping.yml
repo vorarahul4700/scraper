@@ -36,7 +36,7 @@ jobs:
   scrape:
     needs: plan
     runs-on: ubuntu-22.04
-    timeout-minutes: 180  # Increased timeout for captcha handling
+    # timeout-minutes: 120
 
     strategy:
       fail-fast: false
@@ -60,8 +60,9 @@ jobs:
             ca-certificates \
             unzip \
             xvfb \
-            ffmpeg \
             libxss1 \
+            libappindicator3-1 \
+            libindicator7 \
             libnss3 \
             libnspr4 \
             libatk-bridge2.0-0 \
@@ -72,21 +73,14 @@ jobs:
             libgbm1 \
             libasound2 \
             fonts-liberation \
-            libu2f-udev \
-            pulseaudio \
-            pulseaudio-utils \
-            alsa-utils \
-            libappindicator3-1 \
-            libindicator3-7 \
-            libappindicator1 \
-            libindicator7
-          
+            libu2f-udev
+
           # Download and install Chrome
           wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
           sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
-          
+
           # Verify Chrome installation
           google-chrome-stable --version
 
@@ -96,104 +90,48 @@ jobs:
           pip install \
             selenium==4.18.1 \
             undetected-chromedriver==3.5.5 \
-            webdriver-manager==4.0.1 \
+            webdriver-manager \
             pandas==2.1.4 \
             beautifulsoup4==4.12.2 \
             requests==2.31.0 \
             lxml==4.9.3 \
             fake-useragent==1.4.0 \
             python-dateutil==2.8.2 \
-            SpeechRecognition==3.10.1 \
+            speechrecognition==3.10.1 \
             pydub==0.25.1 \
-            chromedriver-autoinstaller==0.6.4 \
-
-      - name: Setup audio virtual sink (for pulseaudio)
-        run: |
-          # Start pulseaudio with a virtual sink
-          pulseaudio --start --exit-idle-time=-1
-          pactl load-module module-virtual-sink sink_name=v1
-          pactl set-default-sink v1
-          pactl set-default-source v1.monitor
-          echo "Audio virtual sink configured"
+            chromedriver-autoinstaller==0.6.4
 
       - name: Run scraper
         env:
           DISPLAY: :99
-          PULSE_SERVER: unix:/run/user/$(id -u)/pulse/native  # ADDED: PulseAudio server
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_PORT: ${{ secrets.FTP_PORT }}
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}
           FTP_PATH: ${{ secrets.FTP_PATH }}
         run: |
-          # Start Xvfb with larger screen and audio support
-          Xvfb :99 -screen 0 1920x1080x24 -ac &
-          export DISPLAY=:99
-          
-          # Wait for Xvfb to start
-          sleep 5
-          
-          # Start a simple window manager to handle popups better
-          sudo apt-get install -y fluxbox
-          fluxbox &
-          
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 3
+
           INPUT_FILE="${{ github.event.inputs.input_filename || 'google_shopping.csv' }}"
           TOTAL_CHUNKS="${{ github.event.inputs.total_chunks || 4 }}"
 
-          # Run with retry logic for the whole script
-          MAX_RETRIES=3
-          RETRY_COUNT=0
-          
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            echo "Attempt $((RETRY_COUNT+1)) of $MAX_RETRIES"
-            
-            python -u gshopping/gscrapperci.py \
-              --chunk-id ${{ matrix.chunk_id }} \
-              --total-chunks $TOTAL_CHUNKS \
-              --input-file "$INPUT_FILE"
-            
-            EXIT_CODE=$?
-            
-            if [ $EXIT_CODE -eq 0 ]; then
-              echo "✓ Scraping completed successfully"
-              break
-            else
-              echo "✗ Scraping failed with exit code $EXIT_CODE"
-              RETRY_COUNT=$((RETRY_COUNT+1))
-              
-              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                echo "Retrying in 60 seconds..."
-                sleep 60
-                
-                # Clean up any lingering processes
-                pkill -f chrome || true
-                pkill -f Xvfb || true
-                
-                # Restart Xvfb
-                Xvfb :99 -screen 0 1920x1080x24 -ac &
-                sleep 5
-              fi
-            fi
-          done
-          
-          # Exit with the last exit code if all retries failed
-          if [ $RETRY_COUNT -eq $MAX_RETRIES ] && [ $EXIT_CODE -ne 0 ]; then
-            echo "✗ All retry attempts failed"
-            exit $EXIT_CODE
-          fi
+          python -u gshopping/gscrapperci.py \
+            --chunk-id ${{ matrix.chunk_id }} \
+            --total-chunks $TOTAL_CHUNKS \
+            --input-file "$INPUT_FILE"
 
       - name: Upload chunk results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: chunk-${{ matrix.chunk_id }}-${{ github.run_id }}
+          name: chunk-${{ matrix.chunk_id }}
           path: output/
           retention-days: 1
 
   merge:
     needs: scrape
     runs-on: ubuntu-latest
-    if: always()  # Run even if some chunks failed
 
     steps:
       - uses: actions/checkout@v4
@@ -211,123 +149,90 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: chunks
-          pattern: chunk-*
-          merge-multiple: true
 
       - name: Merge CSV files
         run: |
-          cat > merge_results.py <<'EOF'
-          import os
-          import pandas as pd
-          from datetime import datetime
-          import glob
+            cat > merge_results.py <<EOF
+            import os
+            import pandas as pd
+            from datetime import datetime
 
-          # Find all CSV files
-          product_files = glob.glob("chunks/**/product_info_*.csv", recursive=True)
-          seller_files = glob.glob("chunks/**/seller_info_*.csv", recursive=True)
+            product_files = []
+            seller_files = []
 
-          print(f"Found {len(product_files)} product files")
-          print(f"Found {len(seller_files)} seller files")
+            for root, _, files in os.walk("chunks"):
+                for f in files:
+                    path = os.path.join(root, f)
+                    if f.endswith(".csv") and "product" in f:
+                        product_files.append(path)
+                    elif f.endswith(".csv") and "seller" in f:
+                        seller_files.append(path)
 
-          ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-          # Merge product files
-          if product_files:
-              dfs = []
-              for f in product_files:
-                  try:
-                      df = pd.read_csv(f)
-                      dfs.append(df)
-                      print(f"Loaded {f}: {len(df)} rows")
-                  except Exception as e:
-                      print(f"Error loading {f}: {e}")
-              
-              if dfs:
-                  df_merged = pd.concat(dfs, ignore_index=True)
-                  df_merged.sort_values("product_id", inplace=True)
-                  
-                  # Remove duplicates if any
-                  df_merged = df_merged.drop_duplicates(subset=['product_id'], keep='last')
-                  
-                  output_file = f"merged_products_{ts}.csv"
-                  df_merged.to_csv(output_file, index=False)
-                  print(f"✓ Saved {output_file} with {len(df_merged)} rows")
+            if product_files:
+                df = pd.concat((pd.read_csv(f) for f in product_files), ignore_index=True)
+                df.sort_values("product_id", inplace=True)
+                df.to_csv(f"merged_products_{ts}.csv", index=False)
 
-          # Merge seller files
-          if seller_files:
-              dfs = []
-              for f in seller_files:
-                  try:
-                      df = pd.read_csv(f)
-                      dfs.append(df)
-                      print(f"Loaded {f}: {len(df)} rows")
-                  except Exception as e:
-                      print(f"Error loading {f}: {e}")
-              
-              if dfs:
-                  df_merged = pd.concat(dfs, ignore_index=True)
-                  df_merged.sort_values(["product_id", "seller"], inplace=True)
-                  
-                  # Remove duplicates if any
-                  df_merged = df_merged.drop_duplicates(subset=['product_id', 'seller', 'seller_url'], keep='last')
-                  
-                  output_file = f"merged_sellers_{ts}.csv"
-                  df_merged.to_csv(output_file, index=False)
-                  print(f"✓ Saved {output_file} with {len(df_merged)} rows")
-          EOF
+            if seller_files:
+                df = pd.concat((pd.read_csv(f) for f in seller_files), ignore_index=True)
+                df.sort_values(["product_id", "seller"], inplace=True)
+                df.to_csv(f"merged_sellers_{ts}.csv", index=False)
+            EOF
 
-          python merge_results.py
+                python merge_results.py
 
       - name: Upload merged files to FTP
-        if: success()
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}
           FTP_PATH: ${{ secrets.FTP_PATH }}
         run: |
-          # Upload each merged file using curl
-          for file in merged_products_*.csv merged_sellers_*.csv; do
-            if [ -f "$file" ]; then
-              echo "Uploading $file to ftp://$FTP_HOST$FTP_PATH/"
-              
-              # Using curl for FTP upload
-              curl -T "$file" \
-                --user "$FTP_USER:$FTP_PASS" \
-                "ftp://$FTP_HOST$FTP_PATH/$file"
-              
-              if [ $? -eq 0 ]; then
-                echo "✓ Uploaded $file"
-              else
-                echo "✗ Failed to upload $file"
-                exit 1
-              fi
-            fi
-          done
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y lftp
+
+          upload () {
+            FILE="$1"
+            echo "Uploading $FILE"
+
+            cat >/tmp/upload.lftp <<EOF
+          set ftp:ssl-allow no
+          open $FTP_HOST
+          user $FTP_USER $FTP_PASS
+          mkdir -p $FTP_PATH
+          cd $FTP_PATH
+          put $FILE
+          bye
+          EOF
+
+                      lftp -f /tmp/upload.lftp
+                      rm -f /tmp/upload.lftp
+                    }
+
+                    shopt -s nullglob
+
+                    for f in merged_products_*.csv; do upload "$f"; done
+                    for f in merged_sellers_*.csv; do upload "$f"; done
+
       - name: Upload merged artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: merged-results-${{ github.run_id }}
+          name: merged-results
           path: |
             merged_products_*.csv
             merged_sellers_*.csv
           retention-days: 7
 
   notify:
-    needs: [merge]
+    needs: merge
     runs-on: ubuntu-latest
     if: always()
 
     steps:
       - name: Summary
         run: |
-          echo "## Workflow Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Workflow:** ${{ github.workflow }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Run ID:** ${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Status:** ${{ needs.merge.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "🔗 [View Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+          echo "Workflow finished"
+          echo "Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

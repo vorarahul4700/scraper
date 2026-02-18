@@ -249,7 +249,7 @@ def get_audio_source(driver):
 
 def solve_recaptcha_audio(driver):
     """
-    Main function to solve reCAPTCHA with improved iframe handling and browser-based audio capture
+    Main function to solve reCAPTCHA with improved iframe handling
     """
     try:
         logger.info("Attempting to solve captcha...")
@@ -262,15 +262,21 @@ def solve_recaptcha_audio(driver):
         frames = driver.find_elements(By.TAG_NAME, "iframe")
         logger.info(f"Found {len(frames)} iframes on page")
         
-        # Look for recaptcha frame
+        # Look for recaptcha frame by title, src, or name
         recaptcha_frame = None
+        recaptcha_frame_index = -1
+        
         for i, frame in enumerate(frames):
             try:
                 src = frame.get_attribute("src") or ""
                 title = frame.get_attribute("title") or ""
+                name = frame.get_attribute("name") or ""
                 
-                if any(x in (src + title).lower() for x in ["recaptcha", "captcha"]):
+                logger.info(f"Frame {i}: src={src[:50]}..., title={title}, name={name}")
+                
+                if any(x in (src + title + name).lower() for x in ["recaptcha", "captcha"]):
                     recaptcha_frame = frame
+                    recaptcha_frame_index = i
                     logger.info(f"✅ Found recaptcha frame at index {i}")
                     break
             except:
@@ -280,205 +286,180 @@ def solve_recaptcha_audio(driver):
             logger.info("No recaptcha frame found, might already be solved")
             return "solved"
         
-        # Switch to recaptcha frame and click checkbox
-        driver.switch_to.frame(recaptcha_frame)
-        time.sleep(2)
-        
-        # Click checkbox
+        # Switch to recaptcha frame
         try:
-            checkbox = driver.find_element(By.CLASS_NAME, "recaptcha-checkbox-border")
-            driver.execute_script("arguments[0].click();", checkbox)
-            logger.info("✅ Clicked reCAPTCHA checkbox")
-            time.sleep(4)
+            driver.switch_to.frame(recaptcha_frame)
+            logger.info(f"Switched to recaptcha frame {recaptcha_frame_index}")
+            time.sleep(2)
+        except Exception as e:
+            logger.error(f"Failed to switch to recaptcha frame: {e}")
+            driver.switch_to.default_content()
+            return "quit"
+        
+        # Click checkbox using JavaScript for reliability
+        try:
+            # Try multiple selectors
+            selectors = [
+                ".recaptcha-checkbox-border",
+                ".recaptcha-checkbox",
+                "#recaptcha-anchor",
+                "div.recaptcha-checkbox-border"
+            ]
+            
+            checkbox = None
+            for selector in selectors:
+                try:
+                    checkbox = driver.find_element(By.CSS_SELECTOR, selector)
+                    break
+                except:
+                    continue
+            
+            if not checkbox:
+                # Try XPath
+                try:
+                    checkbox = driver.find_element(By.XPATH, "//div[@role='checkbox']")
+                except:
+                    pass
+            
+            if checkbox:
+                driver.execute_script("arguments[0].click();", checkbox)
+                logger.info("✅ Clicked reCAPTCHA checkbox")
+                time.sleep(4)  # Give time for challenge to load
+            else:
+                logger.error("❌ Could not find checkbox element")
+                driver.switch_to.default_content()
+                return "quit"
+                
         except Exception as e:
             logger.error(f"❌ Error clicking checkbox: {e}")
             driver.switch_to.default_content()
             return "quit"
         
-        # Switch back and find challenge frame
+        # Switch back to default and look for challenge
         driver.switch_to.default_content()
         time.sleep(3)
         
-        # Find challenge frame
+        # Look for challenge iframe - it might be a new one
         challenge_frame = None
         frames = driver.find_elements(By.TAG_NAME, "iframe")
-        for frame in frames:
+        
+        for i, frame in enumerate(frames):
             try:
                 src = frame.get_attribute("src") or ""
-                if "bframe" in src or "challenge" in src:
+                title = frame.get_attribute("title") or ""
+                name = frame.get_attribute("name") or ""
+                
+                # Look for challenge indicators
+                if any(x in (src + title + name).lower() for x in ["challenge", "bframe", "recaptcha/api2/bframe"]):
                     challenge_frame = frame
+                    logger.info(f"✅ Found challenge frame at index {i}: {src[:50]}...")
                     break
             except:
                 continue
         
         if not challenge_frame:
-            logger.info("No challenge frame found")
+            logger.info("No challenge frame found, CAPTCHA might be solved")
             return "solved"
         
         # Switch to challenge frame
-        driver.switch_to.frame(challenge_frame)
-        time.sleep(2)
+        try:
+            driver.switch_to.frame(challenge_frame)
+            logger.info("Switched to challenge frame")
+            time.sleep(3)
+        except Exception as e:
+            logger.error(f"Failed to switch to challenge frame: {e}")
+            driver.switch_to.default_content()
+            return "quit"
         
         # Click audio challenge button
         try:
-            audio_button = driver.find_element(By.ID, "recaptcha-audio-button")
-            driver.execute_script("arguments[0].click();", audio_button)
-            logger.info("✅ Clicked audio challenge button")
-            time.sleep(5)
+            # Wait for page to load
+            time.sleep(2)
+            
+            # Try multiple ways to find audio button
+            audio_button = None
+            
+            # Method 1: By ID
+            try:
+                audio_button = driver.find_element(By.ID, "recaptcha-audio-button")
+            except:
+                pass
+            
+            # Method 2: By title
+            if not audio_button:
+                try:
+                    audio_button = driver.find_element(By.XPATH, "//button[contains(@title, 'audio') or contains(@title, 'Audio')]")
+                except:
+                    pass
+            
+            # Method 3: By class
+            if not audio_button:
+                try:
+                    audio_button = driver.find_element(By.CLASS_NAME, "rc-button-audio")
+                except:
+                    pass
+            
+            # Method 4: By text content
+            if not audio_button:
+                try:
+                    audio_button = driver.find_element(By.XPATH, "//button[contains(., 'audio') or contains(., 'Audio')]")
+                except:
+                    pass
+            
+            if audio_button:
+                driver.execute_script("arguments[0].click();", audio_button)
+                logger.info("✅ Clicked audio challenge button")
+                time.sleep(5)  # Wait longer for audio to load
+            else:
+                logger.error("❌ Could not find audio button")
+                driver.switch_to.default_content()
+                return "quit"
+                
         except Exception as e:
             logger.error(f"❌ Error clicking audio button: {e}")
             driver.switch_to.default_content()
             return "quit"
         
-        # ===== IMPROVED AUDIO HANDLING =====
-        # Instead of downloading directly, use browser's audio element
-        
-        # Wait for audio element to be present
-        audio_element = None
-        for _ in range(10):  # Wait up to 10 seconds
-            try:
-                audio_element = driver.find_element(By.TAG_NAME, "audio")
-                if audio_element:
-                    break
-            except:
-                pass
-            time.sleep(1)
-        
-        if not audio_element:
-            logger.error("❌ Audio element not found")
-            driver.switch_to.default_content()
-            return "quit"
-        
-        # Try to play audio through browser to ensure it's loaded
-        try:
-            driver.execute_script("""
-                var audio = arguments[0];
-                audio.play().catch(e => console.log('Play failed:', e));
-            """, audio_element)
+        # Get audio source URL with retry
+        audio_src = None
+        for attempt in range(1):
+            logger.info(f"Attempt {attempt + 1}/3 to get audio source...")
+            audio_src = get_audio_source(driver)
+            if audio_src:
+                break
             time.sleep(2)
-        except:
-            pass
-        
-        # Get audio source URL from browser
-        audio_src = audio_element.get_attribute("src")
         
         if not audio_src:
-            logger.error("❌ Could not get audio source URL")
+            logger.error("❌ Could not get audio source URL after multiple attempts")
+            
+            # Try to reload audio
+            try:
+                reload_button = driver.find_element(By.ID, "recaptcha-reload-button")
+                driver.execute_script("arguments[0].click();", reload_button)
+                logger.info("Clicked reload button, waiting for new audio...")
+                time.sleep(4)
+                audio_src = get_audio_source(driver)
+            except:
+                pass
+            
+            if not audio_src:
+                driver.switch_to.default_content()
+                return "quit"
+        
+        # Validate it's actually an audio URL
+        if audio_src and (audio_src.endswith('.js') or 'recaptcha__en.js' in audio_src):
+            logger.error(f"❌ Got JavaScript file instead of audio: {audio_src[:100]}...")
             driver.switch_to.default_content()
             return "quit"
         
-        logger.info(f"Audio source found: {audio_src[:100]}...")
-        
-        # ===== OPTION 1: Download via browser's network (if needed) =====
-        # Use browser's cookies and headers by downloading through JavaScript
+        # Download and process audio
         timestamp = int(time.time())
         mp3_path = os.path.join(os.getcwd(), f"captcha_audio_{timestamp}.mp3")
         wav_path = os.path.join(os.getcwd(), f"captcha_audio_{timestamp}.wav")
         
-        # Download using browser's fetch API (uses same session/cookies)
-        download_success = driver.execute_script("""
-            var audioUrl = arguments[0];
-            var callback = arguments[1];
-            
-            fetch(audioUrl, {
-                credentials: 'include',
-                headers: {
-                    'Accept': 'audio/webm,audio/ogg,audio/wav,audio/*;q=0.9',
-                }
-            })
-            .then(response => response.blob())
-            .then(blob => {
-                var reader = new FileReader();
-                reader.onloadend = function() {
-                    // Convert blob to base64
-                    var base64data = reader.result.split(',')[1];
-                    callback(base64data);
-                };
-                reader.readAsDataURL(blob);
-            })
-            .catch(error => {
-                console.error('Download failed:', error);
-                callback(null);
-            });
-        """, audio_src)
-        
-        # If browser download fails, try alternative approach
-        if not download_success:
-            # ===== OPTION 2: Use browser to play and record =====
-            # This is more complex but sometimes necessary
-            logger.info("Direct download failed, trying playback capture...")
-            
-            # Create a WebRTC recorder in the browser
-            recording_data = driver.execute_script("""
-                var audio = arguments[0];
-                var callback = arguments[1];
-                
-                // Create audio context and recorder
-                var audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                var mediaStreamDestination = audioContext.createMediaStreamDestination();
-                var mediaRecorder = new MediaRecorder(mediaStreamDestination.stream);
-                var chunks = [];
-                
-                // Connect audio element to destination
-                var source = audioContext.createMediaElementSource(audio);
-                source.connect(mediaStreamDestination);
-                source.connect(audioContext.destination);
-                
-                // Start recording
-                mediaRecorder.ondataavailable = function(e) {
-                    if (e.data.size > 0) {
-                        chunks.push(e.data);
-                    }
-                };
-                
-                mediaRecorder.onstop = function() {
-                    var blob = new Blob(chunks, {type: 'audio/webm'});
-                    var reader = new FileReader();
-                    reader.onloadend = function() {
-                        var base64data = reader.result.split(',')[1];
-                        callback(base64data);
-                    };
-                    reader.readAsDataURL(blob);
-                };
-                
-                // Start playing and recording
-                mediaRecorder.start();
-                audio.play();
-                
-                // Stop after duration (get duration from audio)
-                setTimeout(function() {
-                    mediaRecorder.stop();
-                    audio.pause();
-                }, audio.duration * 1000 + 1000);
-            """, audio_element)
-            
-            if recording_data:
-                download_success = recording_data
-        
-        if download_success:
-            # Save the audio data
-            import base64
-            audio_data = base64.b64decode(download_success)
-            with open(mp3_path, 'wb') as f:
-                f.write(audio_data)
-            logger.info(f"✅ Audio saved via browser download: {mp3_path}")
-            
-            # Convert to WAV
-            try:
-                sound = pydub.AudioSegment.from_file(mp3_path)
-                sound.export(wav_path, format="wav")
-                logger.info("✅ Audio converted to WAV")
-            except Exception as e:
-                logger.error(f"❌ Audio conversion error: {e}")
-                # Try alternative conversion
-                try:
-                    sound = pydub.AudioSegment.from_mp3(mp3_path)
-                    sound.export(wav_path, format="wav")
-                except:
-                    driver.switch_to.default_content()
-                    return "quit"
-        else:
-            logger.error("❌ Failed to capture audio")
+        logger.info(f"Downloading audio from: {audio_src[:100]}...")
+        if not download_audio_file(audio_src, mp3_path, wav_path):
+            logger.error("❌ Failed to download audio file")
             driver.switch_to.default_content()
             return "quit"
         
@@ -489,44 +470,66 @@ def solve_recaptcha_audio(driver):
             driver.switch_to.default_content()
             return "quit"
         
-        # Find and fill response input
+        # Enter the response
         try:
-            response_box = driver.find_element(By.ID, "audio-response")
+            # Find response input box
+            response_box = None
+            response_selectors = [
+                "#audio-response",
+                "input[type='text']",
+                "input[name='audio-response']",
+                "input.audio-response"
+            ]
+            
+            for selector in response_selectors:
+                try:
+                    response_box = driver.find_element(By.CSS_SELECTOR, selector)
+                    break
+                except:
+                    continue
+            
             if not response_box:
-                response_box = driver.find_element(By.CSS_SELECTOR, "input[type='text']")
+                # Try by placeholder
+                try:
+                    response_box = driver.find_element(By.XPATH, "//input[@placeholder]")
+                except:
+                    pass
             
-            # Clear and enter text with human-like typing
-            response_box.clear()
-            time.sleep(0.5)
-            
-            captcha_text = captcha_text.lower().strip()
-            logger.info(f"Entering response: {captcha_text}")
-            
-            # Type with random delays
-            for ch in captcha_text:
-                response_box.send_keys(ch)
-                time.sleep(random.uniform(0.08, 0.2))
-            
-            # Submit
-            response_box.send_keys(Keys.ENTER)
-            logger.info("✅ Response submitted")
-            time.sleep(5)
-            
-            driver.switch_to.default_content()
-            logger.info("🎉 CAPTCHA solved successfully!")
-            
-            # Cleanup
-            cleanup_audio_files()
-            return "solved"
-            
+            if response_box:
+                # Clear and enter text
+                response_box.clear()
+                time.sleep(0.5)
+                
+                # Type character by character
+                captcha_text = captcha_text.lower().strip()
+                logger.info(f"Entering response: {captcha_text}")
+                
+                for ch in captcha_text:
+                    response_box.send_keys(ch)
+                    time.sleep(random.uniform(0.05, 0.15))
+                
+                # Submit
+                response_box.send_keys(Keys.ENTER)
+                logger.info(f"✅ Submitted response: {captcha_text}")
+                time.sleep(5)  # Wait for verification
+                
+                # Switch back to main content
+                driver.switch_to.default_content()
+                
+                logger.info("🎉 CAPTCHA solved successfully!")
+                return "solved"
+            else:
+                logger.error("❌ Could not find response input box")
+                driver.switch_to.default_content()
+                return "quit"
+                
         except Exception as e:
             logger.error(f"❌ Error entering response: {e}")
             driver.switch_to.default_content()
-            cleanup_audio_files()
             return "quit"
             
     except Exception as e:
-        logger.error(f"❌ Unexpected error: {e}")
+        logger.error(f"❌ Unexpected error in solve_recaptcha_audio: {e}")
         import traceback
         traceback.print_exc()
         return "quit"
@@ -535,7 +538,9 @@ def solve_recaptcha_audio(driver):
             driver.switch_to.default_content()
         except:
             pass
-        
+        # Cleanup
+        cleanup_audio_files()
+
 # Cleanup function to remove old audio files
 def cleanup_audio_files():
     import glob
