@@ -16,6 +16,8 @@ import csv
 import traceback
 import pandas as pd
 import argparse
+import re
+from urllib.parse import urlparse, unquote
 # Import the existing captcha solving functions
 try:
     from solvecaptcha import solve_recaptcha_audio
@@ -160,25 +162,25 @@ def start_new_driver(search_url):
 def download_csv_from_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, remote_filename, local_filename):
     """Download CSV file from FTP"""
     try:
-        # print(f"Downloading {remote_filename} from FTP...")
+        print(f"Downloading {remote_filename} from FTP...")
         
-        # ftp = ftplib.FTP()
-        # ftp.connect(ftp_host, int(os.getenv("FTP_PORT", 21)))
-        # ftp.login(ftp_user, ftp_pass)
-        # ftp.set_pasv(True)
+        ftp = ftplib.FTP()
+        ftp.connect(ftp_host, int(os.getenv("FTP_PORT", 21)))
+        ftp.login(ftp_user, ftp_pass)
+        ftp.set_pasv(True)
         
-        # if ftp_path and ftp_path != '/':
-        #     try:
-        #         ftp.cwd(ftp_path)
-        #     except:
-        #         print(f"Error: Could not change to directory {ftp_path}")
-        #         return None
+        if ftp_path and ftp_path != '/':
+            try:
+                ftp.cwd(ftp_path)
+            except:
+                print(f"Error: Could not change to directory {ftp_path}")
+                return None
         
-        # with open(local_filename, 'wb') as f:
-        #     ftp.retrbinary(f'RETR {remote_filename}', f.write)
+        with open(local_filename, 'wb') as f:
+            ftp.retrbinary(f'RETR {remote_filename}', f.write)
         
-        # ftp.quit()
-        # print(f"✓ Downloaded {remote_filename} to {local_filename}")
+        ftp.quit()
+        print(f"✓ Downloaded {remote_filename} to {local_filename}")
         return local_filename
         
     except Exception as e:
@@ -331,7 +333,27 @@ def get_product_options(driver):
     
     return json.dumps(scraped_data, indent=2)
 
-def scrape_product(driver, product_id, keyword, url):
+def normalize_url_path_slug(raw_url):
+    """Return normalized last path segment (slug), removing query/fragment."""
+    try:
+        if not raw_url:
+            return ""
+        cleaned = str(raw_url).strip()
+        if not cleaned or cleaned.lower() == "n/a":
+            return ""
+        if "://" not in cleaned and cleaned.startswith("www."):
+            cleaned = f"https://{cleaned}"
+
+        parsed = urlparse(cleaned)
+        path = unquote(parsed.path or "").strip()
+        path = re.sub(r"/+", "/", path).rstrip("/")
+        if not path:
+            return ""
+        return path.split("/")[-1].strip().lower()
+    except:
+        return ""
+
+def scrape_product(driver, product_id, keyword, url, osb_url=""):
     """Scrape individual product from Google Shopping"""
     try:
         print(f"\nScraping Product ID: {product_id}")
@@ -565,12 +587,17 @@ def scrape_product(driver, product_id, keyword, url):
             osb_position = 0
             seller_count = len(sellers)
             osb_id = ''
+            osb_url_match = False
             
             if search_seller in sellers:
                 osb_position = sellers.index(search_seller) + 1
                 for competitor in competitors:
                     if competitor['seller'] == search_seller:
-                        osb_id = competitor.get('seller_url', '').split('/')[-1] if competitor.get('seller_url') else ''
+                        seller_slug = normalize_url_path_slug(competitor.get('seller_url', ''))
+                        osb_id = seller_slug
+                        target_slug = normalize_url_path_slug(osb_url)
+                        if seller_slug and target_slug:
+                            osb_url_match = seller_slug == target_slug
                         break
             
             result.update({
@@ -578,7 +605,7 @@ def scrape_product(driver, product_id, keyword, url):
                 'seller_count': seller_count,
                 'osb_id': osb_id,
                 'status': 'completed',
-                'last_response': f'Completed - OSB Position: {osb_position}, Total Sellers: {seller_count}'
+                'last_response': f'Completed - OSB Position: {osb_position}, Total Sellers: {seller_count}, OSB URL Match: {"Yes" if osb_url_match else "No"}'
             })
             
         except Exception as e:
@@ -635,7 +662,7 @@ def process_chunk(chunk_file, chunk_id, total_chunks):
             print(f"\nProcessing {index+1}/{len(df)}: Product ID {product_id}")
             
             # Scrape product
-            scraped_data = scrape_product(driver, product_id, keyword, url)
+            scraped_data = scrape_product(driver, product_id, keyword, url, osb_url)
             
             # Add original fields back
             scraped_data['web_id'] = web_id
