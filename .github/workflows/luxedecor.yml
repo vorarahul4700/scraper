@@ -104,8 +104,7 @@ jobs:
           echo "REQUEST_DELAY: $REQUEST_DELAY"
           echo ""
           
-          cd luxedecor
-          python luxedecor.py
+          python luxedecor/luxedecor.py
           
           echo ""
           echo "Generated files:"
