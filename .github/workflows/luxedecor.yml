@@ -373,7 +373,7 @@ jobs:
             cd $FTP_BASE_DIR
             put luxedecor_products_full.csv -o $FILE
             bye
-EOF
+            EOF
             
             if [ $? -eq 0 ]; then
               echo "Upload completed: $FILE"
