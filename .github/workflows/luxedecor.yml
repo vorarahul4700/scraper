@@ -1,0 +1,356 @@
+name: LuxeDecor Product Scraper
+
+on:
+  # Schedule: Run daily at 2 AM UTC
+  schedule:
+    - cron: '0 2 * * *'
+  
+  # Allow manual trigger with configurable parameters
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Base site URL"
+        required: false
+        default: "https://www.luxedecor.com"
+      total_sitemaps:
+        description: "Total sitemaps to process (0 = all)"
+        required: false
+        default: "0"
+      sitemaps_per_job:
+        description: "Sitemaps per parallel job"
+        required: false
+        default: "2"
+      urls_per_sitemap:
+        description: "Max URLs per sitemap (0 = all)"
+        required: false
+        default: "0"
+      max_workers:
+        description: "Parallel requests per job"
+        required: false
+        default: "4"
+      request_delay:
+        description: "Delay between requests (seconds)"
+        required: false
+        default: "2.0"
+
+# Permissions for the GITHUB_TOKEN
+permissions:
+  contents: write
+  actions: read
+
+env:
+  PYTHONUNBUFFERED: 1
+
+jobs:
+  # ============================================================
+  # JOB 1 — PLAN: figure out how many parallel jobs to spawn
+  # ============================================================
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      site_name: ${{ steps.get_site_name.outputs.site_name }}
+    steps:
+      - name: Extract site name from URL
+        id: get_site_name
+        run: |
+          URL="${{ github.event.inputs.url || 'https://www.luxedecor.com' }}"
+          SITE_NAME=$(echo "$URL" | sed -E 's|https?://||;s|www\.||;s|\.[a-zA-Z]+(/.*)?$||;s|/.*||')
+          echo "site_name=$SITE_NAME" >> $GITHUB_OUTPUT
+          echo "Site name: $SITE_NAME"
+
+      - name: Build job matrix
+        id: matrix
+        run: |
+          TOTAL=${{ github.event.inputs.total_sitemaps || '0' }}
+          PER_JOB=${{ github.event.inputs.sitemaps_per_job || '2' }}
+          URL="${{ github.event.inputs.url || 'https://www.luxedecor.com' }}"
+
+          # If TOTAL is 0, we'll assume a default of 10 (will be adjusted at runtime)
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "total_sitemaps=0, will fetch actual count during runtime"
+            TOTAL=10  # Default assumption for matrix calculation
+          fi
+
+          # Calculate number of parallel jobs needed
+          JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))
+          
+          # Cap at 8 parallel jobs to avoid overwhelming the server
+          if [ $JOBS -gt 8 ]; then
+            JOBS=8
+            echo "Capping parallel jobs at 8"
+          fi
+
+          # Build JSON matrix
+          MATRIX="["
+          for ((i=0; i<JOBS; i++)); do
+            OFFSET=$(( i * PER_JOB ))
+            MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$URL\"}"
+            if [ $i -lt $((JOBS - 1)) ]; then
+              MATRIX+=","
+            fi
+          done
+          MATRIX="${MATRIX}]"
+
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "Total sitemaps (estimated): $TOTAL"
+          echo "Sitemaps/job: $PER_JOB"
+          echo "Jobs planned: $JOBS"
+          echo "Matrix: $MATRIX"
+
+  # ============================================================
+  # JOB 2 — SCRAPE: run parallel jobs, each handling a slice
+  # ============================================================
+  scrape:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 180  # 3 hour timeout per job
+    strategy:
+      fail-fast: false  # Don't cancel all jobs if one fails
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.matrix) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests urllib3
+          
+          # Verify scraper file exists
+          if [ ! -f luxedecor/luxedecor.py ]; then
+            echo "Error: luxedecor/luxedecor.py not found!"
+            exit 1
+          fi
+
+      - name: Run LuxeDecor scraper
+        id: scrape
+        env:
+          CURR_URL: ${{ matrix.url }}
+          API_BASE_URL: "${{ matrix.url }}/api/product"
+          SITEMAP_OFFSET: ${{ matrix.offset }}
+          MAX_SITEMAPS: ${{ matrix.limit }}
+          MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap || '0' }}
+          MAX_WORKERS: ${{ github.event.inputs.max_workers || '4' }}
+          REQUEST_DELAY: ${{ github.event.inputs.request_delay || '2.0' }}
+        run: |
+          echo "========================================"
+          echo " LuxeDecor Scraper — Job Configuration"
+          echo "========================================"
+          echo "CURR_URL             : $CURR_URL"
+          echo "API_BASE_URL         : $API_BASE_URL"
+          echo "SITEMAP_OFFSET       : $SITEMAP_OFFSET"
+          echo "MAX_SITEMAPS         : $MAX_SITEMAPS"
+          echo "MAX_URLS_PER_SITEMAP : $MAX_URLS_PER_SITEMAP"
+          echo "MAX_WORKERS          : $MAX_WORKERS"
+          echo "REQUEST_DELAY        : $REQUEST_DELAY"
+          echo "========================================"
+
+          # Change to the directory containing the scraper
+          cd luxedecor
+          
+          # Run the scraper
+          python luxedecor.py 2> error_${SITEMAP_OFFSET}.log | tee output_${SITEMAP_OFFSET}.log
+
+          # Move output files to the root directory for artifact collection
+          cd ..
+          mv luxedecor/luxedecor_products_chunk_*.csv ./ 2>/dev/null || echo "No CSV files generated"
+          mv luxedecor/error_*.log ./ 2>/dev/null || echo "No error logs generated"
+          mv luxedecor/output_*.log ./ 2>/dev/null || echo "No output logs generated"
+
+          echo ""
+          echo "Generated files in root:"
+          ls -la luxedecor_products_chunk_*.csv 2>/dev/null || echo "No CSV files found"
+          ls -la error_*.log 2>/dev/null || echo "No error logs found"
+
+      - name: Upload chunk artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: luxedecor_chunk_${{ matrix.offset }}
+          path: |
+            luxedecor_products_chunk_*.csv
+            error_*.log
+            output_*.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ============================================================
+  # JOB 3 — MERGE: combine all chunk CSVs into one final file
+  # ============================================================
+  merge:
+    needs: [plan, scrape]
+    runs-on: ubuntu-latest
+    if: always()  # Run even if some scrape jobs failed
+
+    steps:
+      - name: Download all chunk artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: chunks
+          pattern: luxedecor_chunk_*
+          merge-multiple: true
+
+      - name: List downloaded files
+        run: |
+          echo "Downloaded files:"
+          ls -la chunks/ || echo "No files in chunks directory"
+          find chunks -name "*.csv" -type f | sort
+
+      - name: Merge CSV chunks
+        id: merge_csv
+        run: |
+          echo "Merging CSV chunks..."
+
+          # Find all CSV files
+          CSV_FILES=$(find chunks -name "luxedecor_products_chunk_*.csv" -type f | sort)
+
+          if [ -z "$CSV_FILES" ]; then
+            echo "ERROR: No CSV files found!"
+            exit 1
+          fi
+
+          echo "Found files:"
+          echo "$CSV_FILES" | while read f; do
+            echo "  - $f ($(wc -l < "$f") lines)"
+          done
+
+          # Get header from first file
+          FIRST_FILE=$(echo "$CSV_FILES" | head -n 1)
+          if [ ! -f "$FIRST_FILE" ]; then
+            echo "ERROR: First file not found: $FIRST_FILE"
+            exit 1
+          fi
+
+          # Create merged file with header
+          head -n 1 "$FIRST_FILE" > luxedecor_products_full.csv
+
+          # Append data from all files (skipping headers)
+          FILE_COUNT=0
+          TOTAL_ROWS=0
+          echo "$CSV_FILES" | while read f; do
+            if [ -f "$f" ]; then
+              FILE_COUNT=$((FILE_COUNT + 1))
+              # Count rows (excluding header)
+              ROWS=$(tail -n +2 "$f" | wc -l)
+              TOTAL_ROWS=$((TOTAL_ROWS + ROWS))
+              echo "  Processing $f — $ROWS data rows"
+              tail -n +2 "$f" | sed '/^$/d' >> luxedecor_products_full.csv
+            fi
+          done
+
+          # Wait for all background processes to complete
+          wait
+
+          # Count final rows
+          FINAL_ROWS=$(tail -n +2 luxedecor_products_full.csv | wc -l)
+          
+          # Set outputs
+          echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+          echo "final_rows=$FINAL_ROWS" >> $GITHUB_OUTPUT
+          
+          echo "========================================="
+          echo "Merge completed:"
+          echo "  Files merged: $FILE_COUNT"
+          echo "  Total rows: $FINAL_ROWS"
+          echo "========================================="
+
+      - name: Create compressed archive
+        run: |
+          if [ -f luxedecor_products_full.csv ]; then
+            gzip -9 -c luxedecor_products_full.csv > luxedecor_products_full.csv.gz
+            echo "Created compressed archive: luxedecor_products_full.csv.gz ($(du -h luxedecor_products_full.csv.gz | cut -f1))"
+          fi
+
+      - name: Build output filename with timestamp
+        id: meta
+        run: |
+          SITE_NAME="${{ needs.plan.outputs.site_name }}"
+          [ -z "$SITE_NAME" ] && SITE_NAME="luxedecor"
+          DATE=$(date +%Y%m%d_%H%M%S)
+          FILENAME="${SITE_NAME}_products_${DATE}.csv"
+          echo "name=$FILENAME" >> $GITHUB_OUTPUT
+          echo "Output filename: $FILENAME"
+
+      - name: Upload to FTP/SFTP (optional)
+        if: success() && secrets.FTP_HOST != ''
+        run: |
+          echo "Uploading to FTP server..."
+          
+          # Install lftp if not available
+          sudo apt-get update -qq && sudo apt-get install -y lftp
+
+          # Upload file
+          lftp -c "open -u $FTP_USER,$FTP_PASS $FTP_HOST; 
+                   set ftp:ssl-allow no;
+                   cd $FTP_PATH;
+                   put luxedecor_products_full.csv -o $FILENAME;
+                   bye"
+
+          echo "FTP upload complete: $FILENAME"
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_PATH: ${{ secrets.FTP_PATH || '/' }}
+          FILENAME: ${{ steps.meta.outputs.name }}
+
+      - name: Create summary report
+        run: |
+          echo "## LuxeDecor Scraping Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Site Name** | ${{ needs.plan.outputs.site_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Site URL** | ${{ github.event.inputs.url || 'https://www.luxedecor.com' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Output File** | ${{ steps.meta.outputs.name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Chunk Files** | ${{ steps.merge_csv.outputs.file_count || 0 }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Total Products** | ${{ steps.merge_csv.outputs.final_rows || 0 }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Max Workers | ${{ github.event.inputs.max_workers || 4 }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Request Delay | ${{ github.event.inputs.request_delay || 2.0 }}s |" >> $GITHUB_STEP_SUMMARY
+          echo "| URLs per Sitemap | ${{ github.event.inputs.urls_per_sitemap || 'All' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Sitemaps per Job | ${{ github.event.inputs.sitemaps_per_job || 2 }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Total Sitemaps | ${{ github.event.inputs.total_sitemaps || 'All' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Show sample data if available
+          if [ -f luxedecor_products_full.csv ]; then
+            echo "### Sample Data (First 5 rows)" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            head -n 6 luxedecor_products_full.csv >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Archive final results
+        uses: actions/upload-artifact@v4
+        with:
+          name: luxedecor_final_results
+          path: |
+            luxedecor_products_full.csv
+            luxedecor_products_full.csv.gz
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload error logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: luxedecor_error_logs
+          path: chunks/*.log
+          retention-days: 7
+          if-no-files-found: ignore
