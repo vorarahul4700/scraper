@@ -1,5 +1,3 @@
-name: Parallel Sitemap Scraper - LuxeDecor
-
 on:
   workflow_dispatch:
     inputs:
@@ -8,26 +6,23 @@ on:
         required: true
         default: "https://www.luxedecor.com"
       total_sitemaps:
-        description: "Total sitemaps to process (0 = auto)"
-        default: "3"
+        description: "Total sitemaps to process (0 = auto-detect, uses 10 as default)"
+        default: "0"
       sitemaps_per_job:
         description: "Sitemaps per parallel job"
-        default: "1"
+        default: "2"
       urls_per_sitemap:
         description: "Max URLs per sitemap (0 = all)"
-        default: "10"
+        default: "0"
       max_workers:
         description: "Parallel requests per job"
-        default: "1"
+        default: "4"
       request_delay:
         description: "Delay between requests (seconds)"
-        default: "15.0"
-      initial_delay:
-        description: "Initial delay before starting (seconds)"
-        default: "20"
-      max_retries:
-        description: "Max retries for rate-limited requests"
-        default: "5"
+        default: "2.0"
+      sitemap_urls_override:
+        description: "Optional: comma-separated sitemap URLs (skips robots.txt fetch entirely)"
+        default: ""
 
 jobs:
   plan:
@@ -35,7 +30,6 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       site_name: ${{ steps.get_site_name.outputs.site_name }}
-      cookies: ${{ steps.get_cookies.outputs.cookies }}
     steps:
       - name: Get site name from URL
         id: get_site_name
@@ -44,80 +38,32 @@ jobs:
           SITE_NAME=$(echo "$URL" | sed -E 's|https?://||;s|www\.||;s|\.[a-zA-Z]+(/.*)?$||;s|/.*||')
           echo "site_name=$SITE_NAME" >> $GITHUB_OUTPUT
           echo "Site name extracted: $SITE_NAME"
-      
-      - name: Get fresh cookies from robots.txt
-        id: get_cookies
-        run: |
-          URL="${{ github.event.inputs.url }}"
-          echo "Fetching robots.txt to get fresh cookies..."
-          
-          # Use browser-like headers to get cookies
-          RESPONSE=$(curl -s -i -c cookies.txt \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36" \
-            -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8" \
-            -H "Accept-Language: en-US,en;q=0.9" \
-            -H "Accept-Encoding: gzip, deflate, br" \
-            -H "Sec-Ch-Ua: \"Not:A-Brand\";v=\"99\", \"Brave\";v=\"145\", \"Chromium\";v=\"145\"" \
-            -H "Sec-Ch-Ua-Mobile: ?0" \
-            -H "Sec-Ch-Ua-Platform: \"Windows\"" \
-            -H "Sec-Fetch-Dest: document" \
-            -H "Sec-Fetch-Mode: navigate" \
-            -H "Sec-Fetch-Site: none" \
-            -H "Sec-Fetch-User: ?1" \
-            -H "Upgrade-Insecure-Requests: 1" \
-            -H "Cache-Control: no-cache" \
-            -H "Pragma: no-cache" \
-            "$URL/robots.txt")
-          
-          # Extract cookies from cookies.txt
-          if [ -f cookies.txt ]; then
-            # Parse cookies.txt to create cookie string
-            COOKIE_STRING=""
-            while IFS= read -r line; do
-              # Skip comments and empty lines
-              if [[ ! "$line" =~ ^# ]] && [ -n "$line" ]; then
-                # Extract domain, name, value
-                parts=($line)
-                if [ ${#parts[@]} -ge 7 ]; then
-                  name="${parts[5]}"
-                  value="${parts[6]}"
-                  if [ -n "$COOKIE_STRING" ]; then
-                    COOKIE_STRING="$COOKIE_STRING; $name=$value"
-                  else
-                    COOKIE_STRING="$name=$value"
-                  fi
-                fi
-              fi
-            done < cookies.txt
-            
-            echo "cookies=$COOKIE_STRING" >> $GITHUB_OUTPUT
-            echo "Successfully extracted cookies"
-          else
-            echo "cookies=" >> $GITHUB_OUTPUT
-            echo "No cookies file generated"
-          fi
-      
+
       - id: matrix
         run: |
           TOTAL=${{ github.event.inputs.total_sitemaps }}
           PER_JOB=${{ github.event.inputs.sitemaps_per_job }}
           URL="${{ github.event.inputs.url }}"
-          
+
           if [ "$TOTAL" -eq 0 ]; then
-            echo "Using default total sitemaps: 3"
-            TOTAL=3
+            echo "Using default total sitemaps: 10"
+            TOTAL=10
           fi
-          
+
           JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))
-          
+
           MATRIX="["
           for ((i=0;i<JOBS;i++)); do
             OFFSET=$(( i * PER_JOB ))
-            JOB_ID=$(( RANDOM % 100 ))
-            MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$URL\",\"job_id\":$JOB_ID},"
+            # Stagger cold-start delay by 15s per job so they don't all hammer
+            # robots.txt at the same time. Job 0 = 0s, Job 1 = 15s, Job 2 = 30s …
+            COLD_START=$(( i * 15 ))
+            # Rotate User-Agent slightly per job offset to reduce fingerprinting
+            UA="Mozilla/5.0 (Job-${OFFSET}; Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$URL\",\"cold_start\":$COLD_START,\"user_agent\":\"$UA\"},"
           done
           MATRIX="${MATRIX%,}]"
-          
+
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
           echo "Total sitemaps: $TOTAL"
           echo "Sitemaps per job: $PER_JOB"
@@ -130,25 +76,9 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJson(needs.plan.outputs.matrix) }}
-    
+
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Add random initial delay to stagger jobs
-        run: |
-          BASE_DELAY=${{ github.event.inputs.initial_delay }}
-          RANDOM_DELAY=$(( RANDOM % 30 ))
-          JOB_OFFSET=$(( ${{ matrix.job_id }} % 10 ))
-          TOTAL_DELAY=$(( BASE_DELAY + RANDOM_DELAY + JOB_OFFSET ))
-          
-          echo "Staggering job start - waiting ${TOTAL_DELAY} seconds..."
-          
-          # Show countdown
-          for i in $(seq $TOTAL_DELAY -1 1); do
-            echo -ne "Starting in $i seconds...\r"
-            sleep 1
-          done
-          echo -e "\nStarting now!"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -160,29 +90,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests urllib3
 
-      - name: Create rate-limiting configuration
-        run: |
-          REQUEST_DELAY="${{ github.event.inputs.request_delay }}"
-          DELAY_INT=${REQUEST_DELAY%.*}
-          if [ -z "$DELAY_INT" ]; then
-            DELAY_INT=${REQUEST_DELAY}
-          fi
-          
-          MAX_DELAY=$(( DELAY_INT * 3 ))
-          
-          cat > rate_limit_config.json << EOF
-          {
-            "min_delay": $REQUEST_DELAY,
-            "max_delay": $MAX_DELAY,
-            "backoff_factor": 2.0,
-            "max_retries": ${{ github.event.inputs.max_retries }},
-            "jitter": true
-          }
-          EOF
-          
-          echo "Rate limiting configuration:"
-          cat rate_limit_config.json
-
       - name: Run LuxeDecor scraper
         env:
           CURR_URL: ${{ matrix.url }}
@@ -192,59 +99,43 @@ jobs:
           MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap }}
           MAX_WORKERS: ${{ github.event.inputs.max_workers }}
           REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
-          MAX_RETRIES: ${{ github.event.inputs.max_retries }}
-          COOKIES: ${{ needs.plan.outputs.cookies }}
-          PYTHONUNBUFFERED: 1
+          # Stagger startup so parallel jobs don't all hit robots.txt at once
+          COLD_START_DELAY: ${{ matrix.cold_start }}
+          # Per-job User-Agent rotation
+          USER_AGENT: ${{ matrix.user_agent }}
+          # Optional: pass pre-known sitemap URLs to skip robots.txt entirely
+          SITEMAP_URLS_OVERRIDE: ${{ github.event.inputs.sitemap_urls_override }}
         run: |
-          echo "========================================="
           echo "Starting LuxeDecor scraper with configuration:"
-          echo "========================================="
-          echo "CURR_URL: $CURR_URL"
-          echo "API_BASE_URL: $API_BASE_URL"
-          echo "SITEMAP_OFFSET: $SITEMAP_OFFSET"
-          echo "MAX_SITEMAPS: $MAX_SITEMAPS"
-          echo "MAX_URLS_PER_SITEMAP: $MAX_URLS_PER_SITEMAP"
-          echo "MAX_WORKERS: $MAX_WORKERS"
-          echo "REQUEST_DELAY: $REQUEST_DELAY"
-          echo "MAX_RETRIES: $MAX_RETRIES"
-          echo "COOKIES: ${COOKIES:0:50}..." # Show first 50 chars of cookies
-          echo "========================================="
+          echo "  CURR_URL:              $CURR_URL"
+          echo "  API_BASE_URL:          $API_BASE_URL"
+          echo "  SITEMAP_OFFSET:        $SITEMAP_OFFSET"
+          echo "  MAX_SITEMAPS:          $MAX_SITEMAPS"
+          echo "  MAX_URLS_PER_SITEMAP:  $MAX_URLS_PER_SITEMAP"
+          echo "  MAX_WORKERS:           $MAX_WORKERS"
+          echo "  REQUEST_DELAY:         $REQUEST_DELAY"
+          echo "  COLD_START_DELAY:      $COLD_START_DELAY"
+          echo "  USER_AGENT:            $USER_AGENT"
           echo ""
-          
-          # Run the scraper
+
           python luxedecor/luxedecor.py
-          EXIT_CODE=$?
-          
-          if [ $EXIT_CODE -ne 0 ]; then
-            echo "Scraper failed with exit code $EXIT_CODE"
-            exit $EXIT_CODE
-          fi
-          
+
           echo ""
           echo "Generated files:"
           ls -la *.csv 2>/dev/null || echo "No CSV files generated"
-          
-          # Move CSV files if they exist
-          if ls luxedecor/luxedecor_products_chunk_*.csv 1> /dev/null 2>&1; then
-            mv luxedecor/luxedecor_products_chunk_*.csv ./ 2>/dev/null || echo "No CSV files to move"
-          fi
+          mv luxedecor/luxedecor_products_chunk_*.csv ./ 2>/dev/null || true
 
       - name: Upload chunk
-        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: chunk_${{ matrix.offset }}_${{ github.run_attempt }}
-          path: |
-            luxedecor_products_chunk_*.csv
-            rate_limit_config.json
+          name: chunk_${{ matrix.offset }}
+          path: luxedecor_products_chunk_*.csv
           if-no-files-found: warn
-          retention-days: 7
 
   merge:
     needs: [plan, scrape]
     runs-on: ubuntu-latest
-    if: always()
-    
+
     steps:
       - name: Download all chunks
         uses: actions/download-artifact@v4
@@ -257,43 +148,38 @@ jobs:
         id: merge_csv
         run: |
           echo "Merging CSV chunks..."
-          
-          CSV_FILES=$(find chunks -name "luxedecor_products_chunk_*.csv" 2>/dev/null || echo "")
-          
+
+          CSV_FILES=$(find chunks -name "luxedecor_products_chunk_*.csv" 2>/dev/null)
+
           if [ -z "$CSV_FILES" ]; then
-            echo "WARNING: No CSV files found in artifacts!"
-            
-            # Create empty file with headers
-            echo "Product URL,Product ID,Category,Category URL,Brand,Product Name,SKU,MPN,GTIN,Price,Main Image,Quantity,group_attr_1,group_attr_2,Status,Description,Dimensions,Date Scraped" > luxedecor_products_full.csv
-            echo "file_count=0" >> $GITHUB_OUTPUT
-            echo "final_rows=0" >> $GITHUB_OUTPUT
-          else
-            echo "Found CSV files:"
-            echo "$CSV_FILES"
-            
-            FIRST_FILE=$(echo "$CSV_FILES" | head -n 1)
-            echo "Using header from: $FIRST_FILE"
-            
-            head -n 1 "$FIRST_FILE" > luxedecor_products_full.csv
-            
-            TOTAL_ROWS=0
-            FILE_COUNT=0
-            for f in $CSV_FILES; do
-              if [ -f "$f" ]; then
-                FILE_COUNT=$((FILE_COUNT + 1))
-                ROWS=$(tail -n +2 "$f" 2>/dev/null | wc -l || echo "0")
-                TOTAL_ROWS=$((TOTAL_ROWS + ROWS))
-                echo "Processing $f: $ROWS rows"
-                tail -n +2 "$f" 2>/dev/null | sed '/^$/d' >> luxedecor_products_full.csv || true
-              fi
-            done
-            
-            FINAL_ROWS=$(tail -n +2 luxedecor_products_full.csv 2>/dev/null | wc -l)
-            echo "Merged $FINAL_ROWS rows from $FILE_COUNT files"
-            
-            echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
-            echo "final_rows=$FINAL_ROWS" >> $GITHUB_OUTPUT
+            echo "ERROR: No CSV files found in artifacts!"
+            ls -la chunks/ 2>/dev/null || echo "chunks directory not found"
+            exit 1
           fi
+
+          echo "Found CSV files:"
+          echo "$CSV_FILES"
+
+          FIRST_FILE=$(echo "$CSV_FILES" | head -n 1)
+          echo "Using header from: $FIRST_FILE"
+          head -n 1 "$FIRST_FILE" > luxedecor_products_full.csv
+
+          TOTAL_ROWS=0
+          FILE_COUNT=0
+          for f in $CSV_FILES; do
+            if [ -f "$f" ]; then
+              FILE_COUNT=$((FILE_COUNT + 1))
+              ROWS=$(tail -n +2 "$f" | wc -l 2>/dev/null || echo "0")
+              TOTAL_ROWS=$((TOTAL_ROWS + ROWS))
+              echo "Processing $f: $ROWS rows"
+              tail -n +2 "$f" 2>/dev/null | sed '/^$/d' >> luxedecor_products_full.csv
+            fi
+          done
+
+          FINAL_ROWS=$(tail -n +2 luxedecor_products_full.csv 2>/dev/null | wc -l)
+          echo "Merged $FINAL_ROWS rows from $FILE_COUNT files"
+          echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+          echo "final_rows=$FINAL_ROWS" >> $GITHUB_OUTPUT
 
       - name: Build output filename
         id: meta
@@ -303,11 +189,10 @@ jobs:
             SITE_NAME="luxedecor"
           fi
           DATE=$(date +%F_%H%M%S)
-          ATTEMPT=${{ github.run_attempt }}
-          echo "name=${SITE_NAME}_${DATE}_attempt${ATTEMPT}.csv" >> $GITHUB_OUTPUT
+          echo "name=${SITE_NAME}_${DATE}.csv" >> $GITHUB_OUTPUT
+          echo "Generated filename: ${SITE_NAME}_${DATE}.csv"
 
-      - name: Upload to FTP (if configured)
-        if: steps.merge_csv.outputs.final_rows != '0'
+      - name: Upload to FTP
         run: |
           if [ -z "$FTP_HOST" ] || [ -z "$FTP_USER" ] || [ -z "$FTP_PASS" ]; then
             echo "FTP credentials not configured. Skipping FTP upload."
@@ -318,13 +203,13 @@ jobs:
 
           lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
           set ftp:ssl-allow no
-          set net:max-retries 3
-          set net:timeout 30
           set cmd:fail-exit yes
           cd $FTP_BASE_DIR
           put luxedecor_products_full.csv -o $FILE
           bye
           EOF
+
+          echo "Upload completed: $FILE"
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USER }}
@@ -337,31 +222,26 @@ jobs:
           echo "========================================="
           echo "          SCRAPING SUMMARY"
           echo "========================================="
-          echo "Site Name:       ${{ needs.plan.outputs.site_name }}"
-          echo "Site URL:        ${{ github.event.inputs.url }}"
-          echo "Run Attempt:     ${{ github.run_attempt }}"
-          echo "Output File:     ${{ steps.meta.outputs.name }}"
-          echo "Total Files:     ${{ steps.merge_csv.outputs.file_count }} chunks"
-          echo "Total Products:  ${{ steps.merge_csv.outputs.final_rows }} rows"
-          echo ""
+          echo "Site Name:        ${{ needs.plan.outputs.site_name }}"
+          echo "Site URL:         ${{ github.event.inputs.url }}"
+          echo "Output File:      ${{ steps.meta.outputs.name }}"
+          echo "Total Files:      ${{ steps.merge_csv.outputs.file_count }} chunks"
+          echo "Total Products:   ${{ steps.merge_csv.outputs.final_rows }} rows"
           echo "Configuration:"
-          echo "  Max Workers:   ${{ github.event.inputs.max_workers }}"
-          echo "  Request Delay: ${{ github.event.inputs.request_delay }}s"
-          echo "  URLs/Sitemap:  ${{ github.event.inputs.urls_per_sitemap }}"
+          echo "  Max Workers:    ${{ github.event.inputs.max_workers }}"
+          echo "  Request Delay:  ${{ github.event.inputs.request_delay }}s"
+          echo "  URLs/Sitemap:   ${{ github.event.inputs.urls_per_sitemap }}"
+          echo "  Sitemaps/Job:   ${{ github.event.inputs.sitemaps_per_job }}"
+          echo "  Total Sitemaps: ${{ github.event.inputs.total_sitemaps }}"
           echo "========================================="
-          
-          if [ -f "luxedecor_products_full.csv" ] && [ "${{ steps.merge_csv.outputs.final_rows }}" -gt 0 ]; then
-            echo ""
-            echo "First 3 rows of data:"
-            echo "======================"
-            head -n 4 luxedecor_products_full.csv
-          fi
+          echo ""
+          echo "First 3 rows of data:"
+          echo "======================"
+          head -n 4 luxedecor_products_full.csv 2>/dev/null || echo "No data available"
 
       - name: Archive results
         uses: actions/upload-artifact@v4
         with:
-          name: final_results_${{ github.run_attempt }}
-          path: |
-            luxedecor_products_full.csv
-            rate_limit_config.json
+          name: final_results
+          path: luxedecor_products_full.csv
           retention-days: 7
