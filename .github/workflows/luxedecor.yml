@@ -9,19 +9,25 @@ on:
         default: "https://www.luxedecor.com"
       total_sitemaps:
         description: "Total sitemaps to process (0 = auto)"
-        default: "0"
+        default: "5"
       sitemaps_per_job:
         description: "Sitemaps per parallel job"
-        default: "2"
+        default: "1"
       urls_per_sitemap:
         description: "Max URLs per sitemap (0 = all)"
-        default: "0"
+        default: "20"
       max_workers:
         description: "Parallel requests per job"
-        default: "4"
+        default: "1"
       request_delay:
         description: "Delay between requests (seconds)"
-        default: "2.0"
+        default: "10.0"
+      initial_delay:
+        description: "Initial delay before starting (seconds)"
+        default: "15"
+      max_retries:
+        description: "Max retries for rate-limited requests"
+        default: "5"
 
 jobs:
   plan:
@@ -29,6 +35,7 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       site_name: ${{ steps.get_site_name.outputs.site_name }}
+      sitemap_list: ${{ steps.fetch_sitemaps.outputs.sitemap_list }}
     steps:
       - name: Get site name from URL
         id: get_site_name
@@ -38,6 +45,62 @@ jobs:
           echo "site_name=$SITE_NAME" >> $GITHUB_OUTPUT
           echo "Site name extracted: $SITE_NAME"
       
+      - name: Fetch sitemap list with rate limiting
+        id: fetch_sitemaps
+        run: |
+          URL="${{ github.event.inputs.url }}"
+          MAX_RETRIES=3
+          RETRY_COUNT=0
+          
+          echo "Fetching robots.txt from $URL/robots.txt"
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            # Add increasing delay between retries
+            DELAY=$(( RETRY_COUNT * 10 + 5 ))
+            echo "Attempt $((RETRY_COUNT + 1))/$MAX_RETRIES - Waiting ${DELAY}s before request..."
+            sleep $DELAY
+            
+            # Fetch robots.txt with curl and proper user agent
+            ROBOTS=$(curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+                      --max-time 30 \
+                      --connect-timeout 15 \
+                      -w "%{http_code}" \
+                      "$URL/robots.txt")
+            
+            # Split response and status code
+            HTTP_CODE=$(echo "$ROBOTS" | tail -n1)
+            CONTENT=$(echo "$ROBOTS" | sed '$d')
+            
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "Successfully fetched robots.txt"
+              
+              # Extract product sitemaps
+              SITEMAP_LIST=$(echo "$CONTENT" | grep -i "^sitemap:" | grep "sitemap-products" | cut -d' ' -f2- | tr '\n' ' ' | sed 's/ $//')
+              
+              if [ -n "$SITEMAP_LIST" ]; then
+                echo "Found product sitemaps: $SITEMAP_LIST"
+                echo "sitemap_list=$SITEMAP_LIST" >> $GITHUB_OUTPUT
+                break
+              else
+                echo "No product sitemaps found in robots.txt"
+                SITEMAP_LIST=""
+              fi
+            elif [ "$HTTP_CODE" = "429" ]; then
+              echo "Rate limited (429) on attempt $((RETRY_COUNT + 1))"
+              RETRY_COUNT=$((RETRY_COUNT + 1))
+            else
+              echo "HTTP status $HTTP_CODE on attempt $((RETRY_COUNT + 1))"
+              RETRY_COUNT=$((RETRY_COUNT + 1))
+            fi
+            
+            if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+              echo "Max retries reached. Using fallback sitemap pattern."
+              # Fallback to common sitemap patterns
+              SITEMAP_LIST="$URL/sitemap-products-1.xml $URL/sitemap-products-2.xml $URL/sitemap-products-3.xml"
+              echo "sitemap_list=$SITEMAP_LIST" >> $GITHUB_OUTPUT
+            fi
+          done
+      
       - id: matrix
         run: |
           TOTAL=${{ github.event.inputs.total_sitemaps }}
@@ -45,8 +108,16 @@ jobs:
           URL="${{ github.event.inputs.url }}"
           
           if [ "$TOTAL" -eq 0 ]; then
-            echo "Using default total sitemaps: 10"
-            TOTAL=10
+            echo "Auto-detecting total sitemaps from robots.txt..."
+            SITEMAP_LIST="${{ steps.fetch_sitemaps.outputs.sitemap_list }}"
+            if [ -n "$SITEMAP_LIST" ]; then
+              # Count sitemaps in list
+              TOTAL=$(echo "$SITEMAP_LIST" | wc -w)
+              echo "Auto-detected $TOTAL sitemaps"
+            else
+              echo "Using default total sitemaps: 5"
+              TOTAL=5
+            fi
           fi
           
           JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))
@@ -54,7 +125,9 @@ jobs:
           MATRIX="["
           for ((i=0;i<JOBS;i++)); do
             OFFSET=$(( i * PER_JOB ))
-            MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$URL\"},"
+            # Add random job ID for staggered starts
+            JOB_ID=$(( RANDOM % 100 ))
+            MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$URL\",\"job_id\":$JOB_ID},"
           done
           MATRIX="${MATRIX%,}]"
           
@@ -62,6 +135,7 @@ jobs:
           echo "Total sitemaps: $TOTAL"
           echo "Sitemaps per job: $PER_JOB"
           echo "Jobs planned: $JOBS"
+          echo "Matrix: $MATRIX"
 
   scrape:
     needs: plan
@@ -73,18 +147,67 @@ jobs:
     
     steps:
       - uses: actions/checkout@v4
+      
+      - name: Add random initial delay to stagger jobs
+        run: |
+          # Base delay from input
+          BASE_DELAY=${{ github.event.inputs.initial_delay }}
+          
+          # Add random component (0-30 seconds) and job-specific offset
+          RANDOM_DELAY=$(( RANDOM % 30 ))
+          JOB_OFFSET=$(( ${{ matrix.job_id }} % 10 ))
+          TOTAL_DELAY=$(( BASE_DELAY + RANDOM_DELAY + JOB_OFFSET ))
+          
+          echo "Staggering job start - waiting ${TOTAL_DELAY} seconds..."
+          echo "Base delay: ${BASE_DELAY}s"
+          echo "Random delay: ${RANDOM_DELAY}s"
+          echo "Job offset: ${JOB_OFFSET}s"
+          
+          # Show countdown
+          for i in $(seq $TOTAL_DELAY -1 1); do
+            echo -ne "Starting in $i seconds...\r"
+            sleep 1
+          done
+          echo -e "\nStarting now!"
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install dependencies with retry logic
         run: |
-          python -m pip install --upgrade pip
-          pip install requests urllib3
+          MAX_RETRIES=3
+          RETRY_COUNT=0
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            echo "Attempt $((RETRY_COUNT + 1)) to install dependencies"
+            python -m pip install --upgrade pip
+            pip install requests urllib3 && break
+            
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+              echo "Installation failed, retrying in 10 seconds..."
+              sleep 10
+            fi
+          done
 
-      - name: Run LuxeDecor scraper
+      - name: Create rate-limiting configuration
+        run: |
+          cat > rate_limit_config.json << EOF
+          {
+            "min_delay": ${{ github.event.inputs.request_delay }},
+            "max_delay": $(( ${{ github.event.inputs.request_delay }} * 3 )),
+            "backoff_factor": 2.0,
+            "max_retries": ${{ github.event.inputs.max_retries }},
+            "jitter": true
+          }
+          EOF
+          
+          echo "Rate limiting configuration:"
+          cat rate_limit_config.json
+
+      - name: Run LuxeDecor scraper with rate limiting
         env:
           CURR_URL: ${{ matrix.url }}
           API_BASE_URL: "${{ matrix.url }}/api/product"
@@ -93,8 +216,12 @@ jobs:
           MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap }}
           MAX_WORKERS: ${{ github.event.inputs.max_workers }}
           REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
+          MAX_RETRIES: ${{ github.event.inputs.max_retries }}
+          PYTHONUNBUFFERED: 1
         run: |
+          echo "========================================="
           echo "Starting LuxeDecor scraper with configuration:"
+          echo "========================================="
           echo "CURR_URL: $CURR_URL"
           echo "API_BASE_URL: $API_BASE_URL"
           echo "SITEMAP_OFFSET: $SITEMAP_OFFSET"
@@ -102,26 +229,60 @@ jobs:
           echo "MAX_URLS_PER_SITEMAP: $MAX_URLS_PER_SITEMAP"
           echo "MAX_WORKERS: $MAX_WORKERS"
           echo "REQUEST_DELAY: $REQUEST_DELAY"
+          echo "MAX_RETRIES: $MAX_RETRIES"
+          echo "========================================="
           echo ""
           
-          python luxedecor/luxedecor.py
+          # Run with timeout and retry logic
+          MAX_SCRIPT_RETRIES=2
+          SCRIPT_RETRY=0
+          
+          while [ $SCRIPT_RETRY -lt $MAX_SCRIPT_RETRIES ]; do
+            echo "Script attempt $((SCRIPT_RETRY + 1))/$MAX_SCRIPT_RETRIES"
+            
+            # Run the scraper
+            python luxedecor/luxedecor.py
+            EXIT_CODE=$?
+            
+            if [ $EXIT_CODE -eq 0 ]; then
+              echo "Scraper completed successfully"
+              break
+            else
+              echo "Scraper failed with exit code $EXIT_CODE"
+              SCRIPT_RETRY=$((SCRIPT_RETRY + 1))
+              
+              if [ $SCRIPT_RETRY -lt $MAX_SCRIPT_RETRIES ]; then
+                WAIT_TIME=$((30 * SCRIPT_RETRY))
+                echo "Retrying in $WAIT_TIME seconds..."
+                sleep $WAIT_TIME
+              fi
+            fi
+          done
           
           echo ""
           echo "Generated files:"
           ls -la *.csv 2>/dev/null || echo "No CSV files generated"
-          cd ..
-          mv luxedecor/luxedecor_products_chunk_*.csv ./ 2>/dev/null || echo "No CSV files to move"
+          
+          # Move CSV files if they exist
+          if ls luxedecor/luxedecor_products_chunk_*.csv 1> /dev/null 2>&1; then
+            mv luxedecor/luxedecor_products_chunk_*.csv ./ 2>/dev/null || echo "No CSV files to move"
+          fi
 
       - name: Upload chunk
+        if: always()  # Upload even if step fails
         uses: actions/upload-artifact@v4
         with:
-          name: chunk_${{ matrix.offset }}
-          path: luxedecor_products_chunk_*.csv
+          name: chunk_${{ matrix.offset }}_${{ github.run_attempt }}
+          path: |
+            luxedecor_products_chunk_*.csv
+            rate_limit_config.json
           if-no-files-found: warn
+          retention-days: 7
 
   merge:
     needs: [plan, scrape]
     runs-on: ubuntu-latest
+    if: always()  # Run even if some scrape jobs failed
     
     steps:
       - name: Download all chunks
@@ -136,40 +297,44 @@ jobs:
         run: |
           echo "Merging CSV chunks..."
           
-          CSV_FILES=$(find chunks -name "luxedecor_products_chunk_*.csv" 2>/dev/null)
+          CSV_FILES=$(find chunks -name "luxedecor_products_chunk_*.csv" 2>/dev/null || echo "")
           
           if [ -z "$CSV_FILES" ]; then
-            echo "ERROR: No CSV files found in artifacts!"
+            echo "WARNING: No CSV files found in artifacts!"
             echo "Checking chunks directory:"
             ls -la chunks/ 2>/dev/null || echo "chunks directory not found"
-            exit 1
+            
+            # Create empty file with headers
+            echo "Product URL,Product ID,Category,Category URL,Brand,Product Name,SKU,MPN,GTIN,Price,Main Image,Quantity,group_attr_1,group_attr_2,Status,Description,Dimensions,Date Scraped" > luxedecor_products_full.csv
+            echo "file_count=0" >> $GITHUB_OUTPUT
+            echo "final_rows=0" >> $GITHUB_OUTPUT
+          else
+            echo "Found CSV files:"
+            echo "$CSV_FILES"
+            
+            FIRST_FILE=$(echo "$CSV_FILES" | head -n 1)
+            echo "Using header from: $FIRST_FILE"
+            
+            head -n 1 "$FIRST_FILE" > luxedecor_products_full.csv
+            
+            TOTAL_ROWS=0
+            FILE_COUNT=0
+            for f in $CSV_FILES; do
+              if [ -f "$f" ]; then
+                FILE_COUNT=$((FILE_COUNT + 1))
+                ROWS=$(tail -n +2 "$f" 2>/dev/null | wc -l || echo "0")
+                TOTAL_ROWS=$((TOTAL_ROWS + ROWS))
+                echo "Processing $f: $ROWS rows"
+                tail -n +2 "$f" 2>/dev/null | sed '/^$/d' >> luxedecor_products_full.csv || true
+              fi
+            done
+            
+            FINAL_ROWS=$(tail -n +2 luxedecor_products_full.csv 2>/dev/null | wc -l)
+            echo "Merged $FINAL_ROWS rows from $FILE_COUNT files"
+            
+            echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+            echo "final_rows=$FINAL_ROWS" >> $GITHUB_OUTPUT
           fi
-          
-          echo "Found CSV files:"
-          echo "$CSV_FILES"
-          
-          FIRST_FILE=$(echo "$CSV_FILES" | head -n 1)
-          echo "Using header from: $FIRST_FILE"
-          
-          head -n 1 "$FIRST_FILE" > luxedecor_products_full.csv
-          
-          TOTAL_ROWS=0
-          FILE_COUNT=0
-          for f in $CSV_FILES; do
-            if [ -f "$f" ]; then
-              FILE_COUNT=$((FILE_COUNT + 1))
-              ROWS=$(tail -n +2 "$f" | wc -l 2>/dev/null || echo "0")
-              TOTAL_ROWS=$((TOTAL_ROWS + ROWS))
-              echo "Processing $f: $ROWS rows"
-              tail -n +2 "$f" 2>/dev/null | sed '/^$/d' >> luxedecor_products_full.csv
-            fi
-          done
-          
-          FINAL_ROWS=$(tail -n +2 luxedecor_products_full.csv 2>/dev/null | wc -l)
-          echo "Merged $FINAL_ROWS rows from $FILE_COUNT files"
-          
-          echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
-          echo "final_rows=$FINAL_ROWS" >> $GITHUB_OUTPUT
 
       - name: Build output filename
         id: meta
@@ -179,10 +344,12 @@ jobs:
             SITE_NAME="luxedecor"
           fi
           DATE=$(date +%F_%H%M%S)
-          echo "name=${SITE_NAME}_${DATE}.csv" >> $GITHUB_OUTPUT
-          echo "Generated filename: ${SITE_NAME}_${DATE}.csv"
+          ATTEMPT=${{ github.run_attempt }}
+          echo "name=${SITE_NAME}_${DATE}_attempt${ATTEMPT}.csv" >> $GITHUB_OUTPUT
+          echo "Generated filename: ${SITE_NAME}_${DATE}_attempt${ATTEMPT}.csv"
 
-      - name: Upload to FTP
+      - name: Upload to FTP (if configured)
+        if: steps.merge_csv.outputs.final_rows != '0'
         run: |
           if [ -z "$FTP_HOST" ] || [ -z "$FTP_USER" ] || [ -z "$FTP_PASS" ]; then
             echo "FTP credentials not configured. Skipping FTP upload."
@@ -191,15 +358,34 @@ jobs:
 
           sudo apt-get update && sudo apt-get install -y lftp
 
-          lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
-          set ftp:ssl-allow no
-          set cmd:fail-exit yes
-          cd $FTP_BASE_DIR
-          put luxedecor_products_full.csv -o $FILE
-          bye
-          EOF
-
-          echo "Upload completed: $FILE"
+          # FTP upload with retry logic
+          MAX_FTP_RETRIES=3
+          FTP_RETRY=0
+          
+          while [ $FTP_RETRY -lt $MAX_FTP_RETRIES ]; do
+            echo "FTP upload attempt $((FTP_RETRY + 1))/$MAX_FTP_RETRIES"
+            
+            lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
+            set ftp:ssl-allow no
+            set net:max-retries 3
+            set net:timeout 30
+            set cmd:fail-exit yes
+            cd $FTP_BASE_DIR
+            put luxedecor_products_full.csv -o $FILE
+            bye
+EOF
+            
+            if [ $? -eq 0 ]; then
+              echo "Upload completed: $FILE"
+              break
+            else
+              FTP_RETRY=$((FTP_RETRY + 1))
+              if [ $FTP_RETRY -lt $MAX_FTP_RETRIES ]; then
+                echo "FTP upload failed, retrying in 15 seconds..."
+                sleep 15
+              fi
+            fi
+          done
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USER }}
@@ -214,26 +400,54 @@ jobs:
           echo "========================================="
           echo "Site Name:       ${{ needs.plan.outputs.site_name }}"
           echo "Site URL:        ${{ github.event.inputs.url }}"
+          echo "Run Attempt:     ${{ github.run_attempt }}"
           echo "Output File:     ${{ steps.meta.outputs.name }}"
           echo "Total Files:     ${{ steps.merge_csv.outputs.file_count }} chunks"
           echo "Total Products:  ${{ steps.merge_csv.outputs.final_rows }} rows"
+          echo ""
           echo "Configuration:"
           echo "  Max Workers:   ${{ github.event.inputs.max_workers }}"
           echo "  Request Delay: ${{ github.event.inputs.request_delay }}s"
+          echo "  Initial Delay: ${{ github.event.inputs.initial_delay }}s"
+          echo "  Max Retries:   ${{ github.event.inputs.max_retries }}"
           echo "  URLs/Sitemap:  ${{ github.event.inputs.urls_per_sitemap }}"
           echo "  Sitemaps/Job:  ${{ github.event.inputs.sitemaps_per_job }}"
           echo "  Total Sitemaps: ${{ github.event.inputs.total_sitemaps }}"
           echo "========================================="
           
-          echo ""
-          echo "First 3 rows of data:"
-          echo "======================"
-          head -n 4 luxedecor_products_full.csv 2>/dev/null || echo "No data available"
+          if [ -f "luxedecor_products_full.csv" ] && [ "${{ steps.merge_csv.outputs.final_rows }}" -gt 0 ]; then
+            echo ""
+            echo "First 3 rows of data:"
+            echo "======================"
+            head -n 4 luxedecor_products_full.csv
+          else
+            echo ""
+            echo "No data available - scraping may have been rate-limited"
+            echo "Try increasing delays and reducing concurrency"
+          fi
+          echo "========================================="
 
       - name: Archive results
         uses: actions/upload-artifact@v4
         with:
-          name: final_results
+          name: final_results_${{ github.run_attempt }}
           path: |
             luxedecor_products_full.csv
+            rate_limit_config.json
           retention-days: 7
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "========================================="
+          echo "SCRAPING FAILED OR PARTIALLY COMPLETED"
+          echo "========================================="
+          echo "The scraper encountered issues, likely due to rate limiting."
+          echo ""
+          echo "Suggestions:"
+          echo "1. Increase 'request_delay' to 15-20 seconds"
+          echo "2. Reduce 'max_workers' to 1"
+          echo "3. Reduce 'urls_per_sitemap' to 10-15"
+          echo "4. Increase 'initial_delay' to 30-60 seconds"
+          echo "5. Try running during off-peak hours"
+          echo "========================================="
