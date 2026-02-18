@@ -239,10 +239,15 @@ class LuxeDecorScraper:
         if not sitemap_urls:
             # Common patterns for LuxeDecor
             patterns = [
-                f"{self.curr_url}/sitemap-products-1.xml",
-                f"{self.curr_url}/sitemap-products-1.xml.gz",
-                f"{self.curr_url}/sitemap_products_1.xml",
-                f"{self.curr_url}/product-sitemap.xml",
+                f"{self.curr_url}/sitemap-products-lighting.gz",
+                f"{self.curr_url}/sitemap-products-furniture.gz",
+                f"{self.curr_url}/sitemap-products-decor.gz",
+                f"{self.curr_url}/sitemap-products-outdoor.gz",
+                f"{self.curr_url}/sitemap-products-umbrellas.gz",
+                f"{self.curr_url}/sitemap-products-heaters.gz",
+                f"{self.curr_url}/sitemap-products-rugs.gz",
+                f"{self.curr_url}/sitemap-products-kitchen-bath.gz",
+                f"{self.curr_url}/sitemap-products-grills.gz"
             ]
             
             # Test each pattern until we find one that works
