@@ -194,10 +194,21 @@ jobs:
 
       - name: Create rate-limiting configuration
         run: |
+          # Get delay from input and convert to integer for calculation
+          REQUEST_DELAY="${{ github.event.inputs.request_delay }}"
+          # Remove decimal part for bash calculation if needed
+          DELAY_INT=${REQUEST_DELAY%.*}
+          if [ -z "$DELAY_INT" ]; then
+            DELAY_INT=${REQUEST_DELAY}
+          fi
+          
+          # Calculate max delay (3x the input delay)
+          MAX_DELAY=$(( DELAY_INT * 3 ))
+          
           cat > rate_limit_config.json << EOF
           {
-            "min_delay": ${{ github.event.inputs.request_delay }},
-            "max_delay": $(( ${{ github.event.inputs.request_delay }} * 3 )),
+            "min_delay": $REQUEST_DELAY,
+            "max_delay": $MAX_DELAY,
             "backoff_factor": 2.0,
             "max_retries": ${{ github.event.inputs.max_retries }},
             "jitter": true
