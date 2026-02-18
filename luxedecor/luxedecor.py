@@ -8,6 +8,7 @@ import requests
 import re
 import json
 import urllib3
+import random
 from typing import Optional, List, Dict, Any, Set
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
@@ -29,8 +30,9 @@ class LuxeDecorScraper:
         self.sitemap_offset = int(os.getenv("SITEMAP_OFFSET", "0"))
         self.max_sitemaps = int(os.getenv("MAX_SITEMAPS", "0"))
         self.max_urls_per_sitemap = int(os.getenv("MAX_URLS_PER_SITEMAP", "0"))
-        self.max_workers = int(os.getenv("MAX_WORKERS", "4"))
-        self.request_delay = float(os.getenv("REQUEST_DELAY", "2.0"))  # Increased delay for rate limiting
+        self.max_workers = int(os.getenv("MAX_WORKERS", "1"))
+        self.request_delay = float(os.getenv("REQUEST_DELAY", "15.0"))
+        self.cookies_string = os.getenv("COOKIES", "")
         
         # Output file
         self.output_csv = f"luxedecor_products_chunk_{self.sitemap_offset}.csv"
@@ -47,14 +49,33 @@ class LuxeDecorScraper:
         # Thread lock for CSV writing
         self.csv_lock = threading.Lock()
         
+        # Browser-like headers from successful request
+        self.browser_headers = {
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "accept-encoding": "gzip, deflate, br, zstd",
+            "accept-language": "en-US,en;q=0.9",
+            "cache-control": "no-cache",
+            "pragma": "no-cache",
+            "priority": "u=0, i",
+            "sec-ch-ua": '"Not:A-Brand";v="99", "Brave";v="145", "Chromium";v="145"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "none",
+            "sec-fetch-user": "?1",
+            "sec-gpc": "1",
+            "upgrade-insecure-requests": "1",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+        }
+        
+        # Add cookies if provided
+        if self.cookies_string:
+            self.browser_headers["cookie"] = self.cookies_string
+        
         # Session for HTTP requests
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Connection": "keep-alive",
-        })
+        self.session.headers.update(self.browser_headers)
         
         self.log("=" * 60)
         self.log("LuxeDecor.com Scraper Initialized")
@@ -66,6 +87,7 @@ class LuxeDecorScraper:
         self.log(f"Max URLs per Sitemap: {self.max_urls_per_sitemap if self.max_urls_per_sitemap > 0 else 'All'}")
         self.log(f"Max Workers: {self.max_workers}")
         self.log(f"Request Delay: {self.request_delay}s")
+        self.log(f"Cookies: {'Provided' if self.cookies_string else 'Not provided'}")
         self.log("=" * 60)
     
     def log(self, msg: str, level: str = "INFO"):
@@ -74,53 +96,75 @@ class LuxeDecorScraper:
         sys.stderr.write(f"[{timestamp}] [{level}] {msg}\n")
         sys.stderr.flush()
     
+    def get_api_headers(self):
+        """Get headers specifically for API requests"""
+        headers = self.browser_headers.copy()
+        headers.update({
+            "accept": "application/json, text/javascript, */*; q=0.01",
+            "x-requested-with": "XMLHttpRequest",
+            "referer": f"{self.curr_url}/",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+        })
+        return headers
+    
     def http_get(self, url: str, is_json: bool = False) -> Optional[str]:
-        """HTTP GET request with retry logic"""
-        for attempt in range(3):
+        """HTTP GET request with retry logic and exponential backoff"""
+        
+        # Select appropriate headers
+        headers = self.get_api_headers() if is_json else self.browser_headers
+        
+        # Add random jitter to delay
+        jitter = random.uniform(0.5, 1.5)
+        
+        for attempt in range(5):  # Increased retries
             try:
-                if is_json:
-                    # Headers for JSON/API requests
-                    headers = {
-                        "Accept": "application/json, text/javascript, */*; q=0.01",
-                        "X-Requested-With": "XMLHttpRequest",
-                        "Referer": f"{self.curr_url}/",
-                    }
-                    response = self.session.get(url, headers=headers, timeout=15, verify=True)
-                else:
-                    # For sitemap/XML requests
-                    response = self.session.get(url, timeout=15, verify=True)
+                # Rotate user agent slightly on each retry (keep same family but different version)
+                if attempt > 0:
+                    chrome_versions = ["120", "121", "122", "123", "124", "125"]
+                    random_version = random.choice(chrome_versions)
+                    headers["user-agent"] = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random_version}.0.0.0 Safari/537.36"
+                
+                response = self.session.get(url, headers=headers, timeout=30, verify=True)
                 
                 if response.status_code == 200:
                     return response.text
                 elif response.status_code == 429:  # Rate limited
-                    wait_time = 5 * (attempt + 1)  # Progressive wait
-                    self.log(f"Rate limited on {url}, waiting {wait_time}s", "WARNING")
+                    wait_time = (2 ** attempt) * self.request_delay * jitter
+                    self.log(f"Rate limited on {url}, waiting {wait_time:.1f}s", "WARNING")
+                    time.sleep(wait_time)
+                elif response.status_code == 403:
+                    self.log(f"Access forbidden (403) for {url}", "ERROR")
+                    wait_time = self.request_delay * 2 * jitter
                     time.sleep(wait_time)
                 else:
                     self.log(f"Status {response.status_code} for {url}", "WARNING")
-                    time.sleep(2)
+                    time.sleep(self.request_delay * jitter)
+                    
             except requests.exceptions.Timeout:
                 self.log(f"Timeout on attempt {attempt+1} for {url}", "WARNING")
-                time.sleep(2)
+                time.sleep(self.request_delay * (attempt + 1) * jitter)
+            except requests.exceptions.ConnectionError:
+                self.log(f"Connection error on attempt {attempt+1} for {url}", "WARNING")
+                time.sleep(self.request_delay * (attempt + 1) * jitter)
             except Exception as e:
                 self.log(f"Attempt {attempt+1} failed for {url}: {type(e).__name__}", "WARNING")
-                time.sleep(1)
+                time.sleep(self.request_delay * jitter)
+        
         return None
     
     def fetch_json(self, url: str) -> Optional[dict]:
         """Fetch JSON data from API"""
         try:
-            headers = {
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "X-Requested-With": "XMLHttpRequest",
-                "Referer": f"{self.curr_url}/",
-            }
-            response = self.session.get(url, headers=headers, timeout=15, verify=True)
+            headers = self.get_api_headers()
+            response = self.session.get(url, headers=headers, timeout=30, verify=True)
+            
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 429:
                 self.log(f"Rate limited on API {url}", "WARNING")
-                time.sleep(10)  # Longer wait for API rate limits
+                time.sleep(self.request_delay * 2)
             else:
                 self.log(f"API fetch failed: {response.status_code} for {url}", "WARNING")
                 return None
@@ -139,7 +183,7 @@ class LuxeDecorScraper:
                     break
             except Exception as e:
                 self.log(f"Attempt {attempt+1} for sitemap failed: {e}", "WARNING")
-                time.sleep(2)
+                time.sleep(self.request_delay)
         
         if not data:
             self.log(f"Failed to load XML from {url}", "ERROR")
@@ -181,8 +225,8 @@ class LuxeDecorScraper:
         for line in content.split('\n'):
             if line.lower().startswith('sitemap:'):
                 sitemap_url = line.split(':', 1)[1].strip()
-                # Filter only product sitemaps (starting with sitemap-products)
-                if '/sitemap-products-' in sitemap_url:
+                # Filter only product sitemaps
+                if '/sitemap-products-' in sitemap_url or 'sitemap_products' in sitemap_url:
                     sitemap_urls.append(sitemap_url)
                     self.log(f"Found product sitemap: {sitemap_url}", "DEBUG")
         
@@ -198,7 +242,6 @@ class LuxeDecorScraper:
     def extract_product_urls_from_sitemap(self, sitemap_url: str) -> List[str]:
         """
         Extract product URLs from a sitemap
-        Converts .gz to .xml and loads the XML
         """
         # Convert .gz to .xml if needed
         xml_url = self.convert_gz_to_xml_url(sitemap_url)
@@ -223,7 +266,7 @@ class LuxeDecorScraper:
             
             if elements:
                 for elem in elements:
-                    if elem.text and '/product/' in elem.text:
+                    if elem.text and ('/product/' in elem.text or '/products/' in elem.text):
                         urls.append(elem.text.strip())
                 if urls:
                     break
@@ -245,7 +288,6 @@ class LuxeDecorScraper:
         last_segment = path.split('/')[-1]
         
         # Look for pattern: something-{identifier} at the end
-        # The identifier is typically after the last hyphen
         match = re.search(r'-([a-z0-9]+)$', last_segment, re.IGNORECASE)
         if match:
             return match.group(1).upper()
@@ -257,17 +299,21 @@ class LuxeDecorScraper:
         self.log(f"Could not extract identifier from URL: {product_url}", "WARNING")
         return None
     
-    def get_group_attr_details(self , additional_data, identifier , value_fetcher):
+    def get_group_attr_details(self, additional_data, identifier, value_fetcher):
+        """Extract group attribute details"""
+        if not additional_data or 'specifications' not in additional_data:
+            return None
+            
         finish_value = None
         for spec in additional_data["specifications"]:
             if spec["name"] == identifier:
-                (value,) = spec["values"]   # raises error if not exactly 1
-                finish_value = value[value_fetcher]
+                if len(spec["values"]) == 1:
+                    value = spec["values"][0]
+                    finish_value = value.get(value_fetcher)
                 break
-
         return finish_value        
     
-    def extract_product_data(self, api_data: dict, product_url: str) -> List[Dict]:
+    def extract_product_data(self, api_data: dict, product_url: str, additional_data: dict = None) -> List[Dict]:
         """
         Extract product data from API response
         """
@@ -276,22 +322,31 @@ class LuxeDecorScraper:
                 self.log(f"Invalid API data for {product_url}", "ERROR")
                 return []
             
-            additional_data = self.fetch_product_additional_data(product_url)
-            
-            product_id = api_data.get('itemProperties' , {}).get('itemId' , '')
-            name = api_data.get('itemProperties' , {}).get('description' , '')
-            sku = api_data.get('itemProperties' , {}).get('sku' , '')
-            brand = api_data.get('vendor' , {}).get('name' , '')
-            price = api_data.get('pricingProperties' , {}).get('retailPrice' , '')
+            product_id = api_data.get('itemProperties', {}).get('itemId', '')
+            name = api_data.get('itemProperties', {}).get('description', '')
+            sku = api_data.get('itemProperties', {}).get('sku', '')
+            brand = api_data.get('vendor', {}).get('name', '')
+            price = api_data.get('pricingProperties', {}).get('retailPrice', '')
             main_image = ""
-            category = api_data.get('mainCategory' , {}).get('name' , '') + " / " + api_data.get('subCategory' , {}).get('name' , {})
-            category_url = api_data.get('mainCategory' , {}).get('link' , '') + " / " + api_data.get('subCategory' , {}).get('link' , {})
-            description = additional_data.get('featureDescription' , '') if additional_data else ""
-            quantity = api_data.get('stockProperties' , {}).get('stockQty' , '')
+            
+            # Handle category
+            main_category = api_data.get('mainCategory', {}).get('name', '')
+            sub_category = api_data.get('subCategory', {}).get('name', '')
+            category = f"{main_category} / {sub_category}" if sub_category else main_category
+            
+            main_cat_url = api_data.get('mainCategory', {}).get('link', '')
+            sub_cat_url = api_data.get('subCategory', {}).get('link', '')
+            category_url = f"{main_cat_url} / {sub_cat_url}" if sub_cat_url else main_cat_url
+            
+            description = additional_data.get('featureDescription', '') if additional_data else ""
+            quantity = api_data.get('stockProperties', {}).get('stockQty', '')
             status = ""
-            dimension_str = additional_data.get('dimension' , '') if additional_data else ""
-            group_attr_1 = self.get_group_attr_details(additional_data , 'finish' , 'name') if additional_data else ""
+            dimension_str = additional_data.get('dimension', '') if additional_data else ""
+            
+            group_attr_1 = ""
             group_attr_2 = ""
+            if additional_data:
+                group_attr_1 = self.get_group_attr_details(additional_data, 'finish', 'name') or ""
             
             # Create product record
             product_info = {
@@ -318,7 +373,7 @@ class LuxeDecorScraper:
             self.log(f"Error extracting product data for {product_url}: {e}", "ERROR")
             return []
     
-    def fetch_product_additional_data(self , product_url: str) -> Optional[dict]:
+    def fetch_product_additional_data(self, product_url: str) -> Optional[dict]:
         """
         Fetch additional data for a product
         """
@@ -326,18 +381,18 @@ class LuxeDecorScraper:
         if not identifier:
             self.stats['errors'] += 1
             self.log(f"No identifier found for {product_url}", "ERROR")
-            return
+            return None
         
-        # Construct API URL
+        # Construct API URL for overview data
         api_url = f"{self.api_base_url}/{identifier.upper()}/overview-data"
-        self.log(f"API URL: {api_url}", "DEBUG")
+        self.log(f"Fetching additional data from: {api_url}", "DEBUG")
         
         # Fetch API data
         api_data = self.fetch_json(api_url)
         if not api_data:
             self.stats['errors'] += 1
-            self.log(f"No API data for {identifier}", "ERROR")
-            return
+            self.log(f"No additional data for {identifier}", "ERROR")
+            return None
         return api_data
     
     def process_product(self, product_url: str, seen: Set[str], writer) -> None:
@@ -357,19 +412,22 @@ class LuxeDecorScraper:
             self.log(f"No identifier found for {product_url}", "ERROR")
             return
         
-        # Construct API URL
+        # Construct main API URL
         api_url = f"{self.api_base_url}/{identifier.upper()}"
-        self.log(f"API URL: {api_url}", "DEBUG")
+        self.log(f"Fetching main API data from: {api_url}", "DEBUG")
         
-        # Fetch API data
+        # Fetch main API data
         api_data = self.fetch_json(api_url)
         if not api_data:
             self.stats['errors'] += 1
             self.log(f"No API data for {identifier}", "ERROR")
             return
         
+        # Fetch additional data
+        additional_data = self.fetch_product_additional_data(product_url)
+        
         # Extract product data
-        products = self.extract_product_data(api_data, product_url)
+        products = self.extract_product_data(api_data, product_url, additional_data)
         
         for product in products:
             if not product.get('product_id'):
@@ -408,8 +466,9 @@ class LuxeDecorScraper:
                 self.log(f"Error creating row for {product_url}: {e}", "ERROR")
                 self.stats['errors'] += 1
         
-        # Respect request delay
-        time.sleep(self.request_delay)
+        # Respect request delay with jitter
+        jitter = random.uniform(0.8, 1.2)
+        time.sleep(self.request_delay * jitter)
         self.stats['urls_processed'] += 1
     
     def normalize_image_url(self, url: str) -> str:
@@ -479,7 +538,7 @@ class LuxeDecorScraper:
                     self.stats['sitemaps_processed'] += 1
                     self.log(f"Processing sitemap {self.stats['sitemaps_processed']}/{len(sitemaps_to_process)}: {sitemap_url}")
                     
-                    # Extract URLs from sitemap (automatically converts .gz to .xml)
+                    # Extract URLs from sitemap
                     urls = self.extract_product_urls_from_sitemap(sitemap_url)
                     
                     # Apply URL limit
@@ -494,21 +553,30 @@ class LuxeDecorScraper:
                         self.log(f"No product URLs found in {sitemap_url}", "WARNING")
                         continue
                     
-                    # Process URLs in parallel
-                    with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                        futures = [
-                            executor.submit(self.process_product, url, seen, writer)
-                            for url in urls
-                        ]
-                        for future in as_completed(futures):
-                            try:
-                                future.result()
-                            except Exception as e:
-                                self.log(f"Error in thread: {e}", "ERROR")
-                                self.stats['errors'] += 1
+                    # Process URLs with limited concurrency
+                    if self.max_workers > 1:
+                        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                            futures = [
+                                executor.submit(self.process_product, url, seen, writer)
+                                for url in urls
+                            ]
+                            for future in as_completed(futures):
+                                try:
+                                    future.result()
+                                except Exception as e:
+                                    self.log(f"Error in thread: {e}", "ERROR")
+                                    self.stats['errors'] += 1
+                    else:
+                        # Process sequentially
+                        for url in urls:
+                            self.process_product(url, seen, writer)
                     
-                    # Clean up memory
+                    # Clean up memory between sitemaps
                     gc.collect()
+                    
+                    # Longer delay between sitemaps
+                    if len(sitemaps_to_process) > 1:
+                        time.sleep(self.request_delay * 2)
             
             # Print statistics
             self.print_statistics()
@@ -519,6 +587,7 @@ class LuxeDecorScraper:
         except Exception as e:
             self.log(f"Fatal error: {e}", "ERROR")
             self.print_statistics()
+            raise
     
     def print_statistics(self):
         """Print scraping statistics"""

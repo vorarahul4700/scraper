@@ -9,22 +9,22 @@ on:
         default: "https://www.luxedecor.com"
       total_sitemaps:
         description: "Total sitemaps to process (0 = auto)"
-        default: "5"
+        default: "3"
       sitemaps_per_job:
         description: "Sitemaps per parallel job"
         default: "1"
       urls_per_sitemap:
         description: "Max URLs per sitemap (0 = all)"
-        default: "20"
+        default: "10"
       max_workers:
         description: "Parallel requests per job"
         default: "1"
       request_delay:
         description: "Delay between requests (seconds)"
-        default: "10.0"
+        default: "15.0"
       initial_delay:
         description: "Initial delay before starting (seconds)"
-        default: "15"
+        default: "20"
       max_retries:
         description: "Max retries for rate-limited requests"
         default: "5"
@@ -35,7 +35,7 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       site_name: ${{ steps.get_site_name.outputs.site_name }}
-      sitemap_list: ${{ steps.fetch_sitemaps.outputs.sitemap_list }}
+      cookies: ${{ steps.get_cookies.outputs.cookies }}
     steps:
       - name: Get site name from URL
         id: get_site_name
@@ -45,61 +45,57 @@ jobs:
           echo "site_name=$SITE_NAME" >> $GITHUB_OUTPUT
           echo "Site name extracted: $SITE_NAME"
       
-      - name: Fetch sitemap list with rate limiting
-        id: fetch_sitemaps
+      - name: Get fresh cookies from robots.txt
+        id: get_cookies
         run: |
           URL="${{ github.event.inputs.url }}"
-          MAX_RETRIES=3
-          RETRY_COUNT=0
+          echo "Fetching robots.txt to get fresh cookies..."
           
-          echo "Fetching robots.txt from $URL/robots.txt"
+          # Use browser-like headers to get cookies
+          RESPONSE=$(curl -s -i -c cookies.txt \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36" \
+            -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8" \
+            -H "Accept-Language: en-US,en;q=0.9" \
+            -H "Accept-Encoding: gzip, deflate, br" \
+            -H "Sec-Ch-Ua: \"Not:A-Brand\";v=\"99\", \"Brave\";v=\"145\", \"Chromium\";v=\"145\"" \
+            -H "Sec-Ch-Ua-Mobile: ?0" \
+            -H "Sec-Ch-Ua-Platform: \"Windows\"" \
+            -H "Sec-Fetch-Dest: document" \
+            -H "Sec-Fetch-Mode: navigate" \
+            -H "Sec-Fetch-Site: none" \
+            -H "Sec-Fetch-User: ?1" \
+            -H "Upgrade-Insecure-Requests: 1" \
+            -H "Cache-Control: no-cache" \
+            -H "Pragma: no-cache" \
+            "$URL/robots.txt")
           
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            # Add increasing delay between retries
-            DELAY=$(( RETRY_COUNT * 10 + 5 ))
-            echo "Attempt $((RETRY_COUNT + 1))/$MAX_RETRIES - Waiting ${DELAY}s before request..."
-            sleep $DELAY
-            
-            # Fetch robots.txt with curl and proper user agent
-            ROBOTS=$(curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-                      --max-time 30 \
-                      --connect-timeout 15 \
-                      -w "%{http_code}" \
-                      "$URL/robots.txt")
-            
-            # Split response and status code
-            HTTP_CODE=$(echo "$ROBOTS" | tail -n1)
-            CONTENT=$(echo "$ROBOTS" | sed '$d')
-            
-            if [ "$HTTP_CODE" = "200" ]; then
-              echo "Successfully fetched robots.txt"
-              
-              # Extract product sitemaps
-              SITEMAP_LIST=$(echo "$CONTENT" | grep -i "^sitemap:" | grep "sitemap-products" | cut -d' ' -f2- | tr '\n' ' ' | sed 's/ $//')
-              
-              if [ -n "$SITEMAP_LIST" ]; then
-                echo "Found product sitemaps: $SITEMAP_LIST"
-                echo "sitemap_list=$SITEMAP_LIST" >> $GITHUB_OUTPUT
-                break
-              else
-                echo "No product sitemaps found in robots.txt"
-                SITEMAP_LIST=""
+          # Extract cookies from cookies.txt
+          if [ -f cookies.txt ]; then
+            # Parse cookies.txt to create cookie string
+            COOKIE_STRING=""
+            while IFS= read -r line; do
+              # Skip comments and empty lines
+              if [[ ! "$line" =~ ^# ]] && [ -n "$line" ]; then
+                # Extract domain, name, value
+                parts=($line)
+                if [ ${#parts[@]} -ge 7 ]; then
+                  name="${parts[5]}"
+                  value="${parts[6]}"
+                  if [ -n "$COOKIE_STRING" ]; then
+                    COOKIE_STRING="$COOKIE_STRING; $name=$value"
+                  else
+                    COOKIE_STRING="$name=$value"
+                  fi
+                fi
               fi
-            elif [ "$HTTP_CODE" = "429" ]; then
-              echo "Rate limited (429) on attempt $((RETRY_COUNT + 1))"
-              RETRY_COUNT=$((RETRY_COUNT + 1))
-            else
-              echo "HTTP status $HTTP_CODE on attempt $((RETRY_COUNT + 1))"
-              RETRY_COUNT=$((RETRY_COUNT + 1))
-            fi
+            done < cookies.txt
             
-            if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
-              echo "Max retries reached. Using fallback sitemap pattern."
-              # Fallback to common sitemap patterns
-              SITEMAP_LIST="$URL/sitemap-products-1.xml $URL/sitemap-products-2.xml $URL/sitemap-products-3.xml"
-              echo "sitemap_list=$SITEMAP_LIST" >> $GITHUB_OUTPUT
-            fi
-          done
+            echo "cookies=$COOKIE_STRING" >> $GITHUB_OUTPUT
+            echo "Successfully extracted cookies"
+          else
+            echo "cookies=" >> $GITHUB_OUTPUT
+            echo "No cookies file generated"
+          fi
       
       - id: matrix
         run: |
@@ -108,16 +104,8 @@ jobs:
           URL="${{ github.event.inputs.url }}"
           
           if [ "$TOTAL" -eq 0 ]; then
-            echo "Auto-detecting total sitemaps from robots.txt..."
-            SITEMAP_LIST="${{ steps.fetch_sitemaps.outputs.sitemap_list }}"
-            if [ -n "$SITEMAP_LIST" ]; then
-              # Count sitemaps in list
-              TOTAL=$(echo "$SITEMAP_LIST" | wc -w)
-              echo "Auto-detected $TOTAL sitemaps"
-            else
-              echo "Using default total sitemaps: 5"
-              TOTAL=5
-            fi
+            echo "Using default total sitemaps: 3"
+            TOTAL=3
           fi
           
           JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))
@@ -125,7 +113,6 @@ jobs:
           MATRIX="["
           for ((i=0;i<JOBS;i++)); do
             OFFSET=$(( i * PER_JOB ))
-            # Add random job ID for staggered starts
             JOB_ID=$(( RANDOM % 100 ))
             MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$URL\",\"job_id\":$JOB_ID},"
           done
@@ -135,7 +122,6 @@ jobs:
           echo "Total sitemaps: $TOTAL"
           echo "Sitemaps per job: $PER_JOB"
           echo "Jobs planned: $JOBS"
-          echo "Matrix: $MATRIX"
 
   scrape:
     needs: plan
@@ -150,18 +136,12 @@ jobs:
       
       - name: Add random initial delay to stagger jobs
         run: |
-          # Base delay from input
           BASE_DELAY=${{ github.event.inputs.initial_delay }}
-          
-          # Add random component (0-30 seconds) and job-specific offset
           RANDOM_DELAY=$(( RANDOM % 30 ))
           JOB_OFFSET=$(( ${{ matrix.job_id }} % 10 ))
           TOTAL_DELAY=$(( BASE_DELAY + RANDOM_DELAY + JOB_OFFSET ))
           
           echo "Staggering job start - waiting ${TOTAL_DELAY} seconds..."
-          echo "Base delay: ${BASE_DELAY}s"
-          echo "Random delay: ${RANDOM_DELAY}s"
-          echo "Job offset: ${JOB_OFFSET}s"
           
           # Show countdown
           for i in $(seq $TOTAL_DELAY -1 1); do
@@ -175,34 +155,19 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies with retry logic
+      - name: Install dependencies
         run: |
-          MAX_RETRIES=3
-          RETRY_COUNT=0
-          
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            echo "Attempt $((RETRY_COUNT + 1)) to install dependencies"
-            python -m pip install --upgrade pip
-            pip install requests urllib3 && break
-            
-            RETRY_COUNT=$((RETRY_COUNT + 1))
-            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-              echo "Installation failed, retrying in 10 seconds..."
-              sleep 10
-            fi
-          done
+          python -m pip install --upgrade pip
+          pip install requests urllib3
 
       - name: Create rate-limiting configuration
         run: |
-          # Get delay from input and convert to integer for calculation
           REQUEST_DELAY="${{ github.event.inputs.request_delay }}"
-          # Remove decimal part for bash calculation if needed
           DELAY_INT=${REQUEST_DELAY%.*}
           if [ -z "$DELAY_INT" ]; then
             DELAY_INT=${REQUEST_DELAY}
           fi
           
-          # Calculate max delay (3x the input delay)
           MAX_DELAY=$(( DELAY_INT * 3 ))
           
           cat > rate_limit_config.json << EOF
@@ -218,7 +183,7 @@ jobs:
           echo "Rate limiting configuration:"
           cat rate_limit_config.json
 
-      - name: Run LuxeDecor scraper with rate limiting
+      - name: Run LuxeDecor scraper
         env:
           CURR_URL: ${{ matrix.url }}
           API_BASE_URL: "${{ matrix.url }}/api/product"
@@ -228,6 +193,7 @@ jobs:
           MAX_WORKERS: ${{ github.event.inputs.max_workers }}
           REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
           MAX_RETRIES: ${{ github.event.inputs.max_retries }}
+          COOKIES: ${{ needs.plan.outputs.cookies }}
           PYTHONUNBUFFERED: 1
         run: |
           echo "========================================="
@@ -241,34 +207,18 @@ jobs:
           echo "MAX_WORKERS: $MAX_WORKERS"
           echo "REQUEST_DELAY: $REQUEST_DELAY"
           echo "MAX_RETRIES: $MAX_RETRIES"
+          echo "COOKIES: ${COOKIES:0:50}..." # Show first 50 chars of cookies
           echo "========================================="
           echo ""
           
-          # Run with timeout and retry logic
-          MAX_SCRIPT_RETRIES=2
-          SCRIPT_RETRY=0
+          # Run the scraper
+          python luxedecor/luxedecor.py
+          EXIT_CODE=$?
           
-          while [ $SCRIPT_RETRY -lt $MAX_SCRIPT_RETRIES ]; do
-            echo "Script attempt $((SCRIPT_RETRY + 1))/$MAX_SCRIPT_RETRIES"
-            
-            # Run the scraper
-            python luxedecor/luxedecor.py
-            EXIT_CODE=$?
-            
-            if [ $EXIT_CODE -eq 0 ]; then
-              echo "Scraper completed successfully"
-              break
-            else
-              echo "Scraper failed with exit code $EXIT_CODE"
-              SCRIPT_RETRY=$((SCRIPT_RETRY + 1))
-              
-              if [ $SCRIPT_RETRY -lt $MAX_SCRIPT_RETRIES ]; then
-                WAIT_TIME=$((30 * SCRIPT_RETRY))
-                echo "Retrying in $WAIT_TIME seconds..."
-                sleep $WAIT_TIME
-              fi
-            fi
-          done
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "Scraper failed with exit code $EXIT_CODE"
+            exit $EXIT_CODE
+          fi
           
           echo ""
           echo "Generated files:"
@@ -280,7 +230,7 @@ jobs:
           fi
 
       - name: Upload chunk
-        if: always()  # Upload even if step fails
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: chunk_${{ matrix.offset }}_${{ github.run_attempt }}
@@ -293,7 +243,7 @@ jobs:
   merge:
     needs: [plan, scrape]
     runs-on: ubuntu-latest
-    if: always()  # Run even if some scrape jobs failed
+    if: always()
     
     steps:
       - name: Download all chunks
@@ -312,8 +262,6 @@ jobs:
           
           if [ -z "$CSV_FILES" ]; then
             echo "WARNING: No CSV files found in artifacts!"
-            echo "Checking chunks directory:"
-            ls -la chunks/ 2>/dev/null || echo "chunks directory not found"
             
             # Create empty file with headers
             echo "Product URL,Product ID,Category,Category URL,Brand,Product Name,SKU,MPN,GTIN,Price,Main Image,Quantity,group_attr_1,group_attr_2,Status,Description,Dimensions,Date Scraped" > luxedecor_products_full.csv
@@ -357,7 +305,6 @@ jobs:
           DATE=$(date +%F_%H%M%S)
           ATTEMPT=${{ github.run_attempt }}
           echo "name=${SITE_NAME}_${DATE}_attempt${ATTEMPT}.csv" >> $GITHUB_OUTPUT
-          echo "Generated filename: ${SITE_NAME}_${DATE}_attempt${ATTEMPT}.csv"
 
       - name: Upload to FTP (if configured)
         if: steps.merge_csv.outputs.final_rows != '0'
@@ -369,34 +316,15 @@ jobs:
 
           sudo apt-get update && sudo apt-get install -y lftp
 
-          # FTP upload with retry logic
-          MAX_FTP_RETRIES=3
-          FTP_RETRY=0
-          
-          while [ $FTP_RETRY -lt $MAX_FTP_RETRIES ]; do
-            echo "FTP upload attempt $((FTP_RETRY + 1))/$MAX_FTP_RETRIES"
-            
-            lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
-            set ftp:ssl-allow no
-            set net:max-retries 3
-            set net:timeout 30
-            set cmd:fail-exit yes
-            cd $FTP_BASE_DIR
-            put luxedecor_products_full.csv -o $FILE
-            bye
-            EOF
-            
-            if [ $? -eq 0 ]; then
-              echo "Upload completed: $FILE"
-              break
-            else
-              FTP_RETRY=$((FTP_RETRY + 1))
-              if [ $FTP_RETRY -lt $MAX_FTP_RETRIES ]; then
-                echo "FTP upload failed, retrying in 15 seconds..."
-                sleep 15
-              fi
-            fi
-          done
+          lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
+          set ftp:ssl-allow no
+          set net:max-retries 3
+          set net:timeout 30
+          set cmd:fail-exit yes
+          cd $FTP_BASE_DIR
+          put luxedecor_products_full.csv -o $FILE
+          bye
+          EOF
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USER }}
@@ -419,11 +347,7 @@ jobs:
           echo "Configuration:"
           echo "  Max Workers:   ${{ github.event.inputs.max_workers }}"
           echo "  Request Delay: ${{ github.event.inputs.request_delay }}s"
-          echo "  Initial Delay: ${{ github.event.inputs.initial_delay }}s"
-          echo "  Max Retries:   ${{ github.event.inputs.max_retries }}"
           echo "  URLs/Sitemap:  ${{ github.event.inputs.urls_per_sitemap }}"
-          echo "  Sitemaps/Job:  ${{ github.event.inputs.sitemaps_per_job }}"
-          echo "  Total Sitemaps: ${{ github.event.inputs.total_sitemaps }}"
           echo "========================================="
           
           if [ -f "luxedecor_products_full.csv" ] && [ "${{ steps.merge_csv.outputs.final_rows }}" -gt 0 ]; then
@@ -431,12 +355,7 @@ jobs:
             echo "First 3 rows of data:"
             echo "======================"
             head -n 4 luxedecor_products_full.csv
-          else
-            echo ""
-            echo "No data available - scraping may have been rate-limited"
-            echo "Try increasing delays and reducing concurrency"
           fi
-          echo "========================================="
 
       - name: Archive results
         uses: actions/upload-artifact@v4
@@ -446,19 +365,3 @@ jobs:
             luxedecor_products_full.csv
             rate_limit_config.json
           retention-days: 7
-
-      - name: Notify on failure
-        if: failure()
-        run: |
-          echo "========================================="
-          echo "SCRAPING FAILED OR PARTIALLY COMPLETED"
-          echo "========================================="
-          echo "The scraper encountered issues, likely due to rate limiting."
-          echo ""
-          echo "Suggestions:"
-          echo "1. Increase 'request_delay' to 15-20 seconds"
-          echo "2. Reduce 'max_workers' to 1"
-          echo "3. Reduce 'urls_per_sitemap' to 10-15"
-          echo "4. Increase 'initial_delay' to 30-60 seconds"
-          echo "5. Try running during off-peak hours"
-          echo "========================================="
