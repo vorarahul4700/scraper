@@ -1,4 +1,4 @@
-name: Parallel Sitemap Scraper - LuxeDecor Scraper
+name: LuxeDecor Scraper
 
 on:
   workflow_dispatch:
@@ -57,13 +57,13 @@ jobs:
           echo "Sitemaps per job: $PER_JOB"
           echo "Jobs planned: $JOBS"
 
-          # Build JSON matrix safely using jq to avoid escaping issues
+          # Build compact single-line JSON matrix using jq -c
+          # jq -c produces no newlines, which is required by GITHUB_OUTPUT file command
           MATRIX_JSON="[]"
           for ((i=0; i<JOBS; i++)); do
             OFFSET=$(( i * PER_JOB ))
             COLD_START=$(( i * 15 ))
-            # Use jq to safely append each object — avoids bash string escaping bugs
-            MATRIX_JSON=$(echo "$MATRIX_JSON" | jq \
+            MATRIX_JSON=$(echo "$MATRIX_JSON" | jq -c \
               --argjson offset "$OFFSET" \
               --argjson limit "$PER_JOB" \
               --arg url "$URL" \
@@ -72,8 +72,9 @@ jobs:
             )
           done
 
+          echo "Matrix (compact): $MATRIX_JSON"
+          # Write compact single-line value — multiline JSON breaks GITHUB_OUTPUT
           echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
-          echo "Matrix: $MATRIX_JSON"
 
   scrape:
     needs: plan
