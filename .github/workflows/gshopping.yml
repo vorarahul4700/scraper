@@ -106,7 +106,6 @@ jobs:
             SpeechRecognition==3.10.1 \
             pydub==0.25.1 \
             chromedriver-autoinstaller==0.6.4 \
-            ftplib==1.0.1  # ADDED: Explicit FTP support
 
       - name: Setup audio virtual sink (for pulseaudio)
         run: |
