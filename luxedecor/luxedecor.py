@@ -60,11 +60,19 @@ class LuxeDecorScraper:
         # Session for HTTP requests
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Connection": "keep-alive",
-            "x-vercel-set-bypass-cookie": "true"
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
+            'cache-control': 'max-age=0',
+            'priority': 'u=0, i',
+            'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'none',
+            'sec-fetch-user': '?1',
+            'upgrade-insecure-requests': '1',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36'
         })
         
         self.log("=" * 60)
@@ -88,12 +96,23 @@ class LuxeDecorScraper:
     
     def http_get(self, url: str, is_json: bool = False) -> Optional[str]:
         """HTTP GET request with retry logic and aggressive backoff for 429"""
-        for attempt in range(5):  # increased from 3 to 5
+        for attempt in range(3):  # increased from 3 to 5
             try:
                 if is_json:
                     headers = {
-                        "Accept": "application/json, text/javascript, */*; q=0.01",
-                        "X-Requested-With": "XMLHttpRequest",
+                        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                        'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
+                        'cache-control': 'max-age=0',
+                        'priority': 'u=0, i',
+                        'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+                        'sec-ch-ua-mobile': '?0',
+                        'sec-ch-ua-platform': '"macOS"',
+                        'sec-fetch-dest': 'document',
+                        'sec-fetch-mode': 'navigate',
+                        'sec-fetch-site': 'none',
+                        'sec-fetch-user': '?1',
+                        'upgrade-insecure-requests': '1',
+                        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
                         "Referer": f"{self.curr_url}/",
                     }
                     response = self.session.get(url, headers=headers, timeout=15, verify=True)
@@ -108,7 +127,7 @@ class LuxeDecorScraper:
                     self.log(f"Rate limited (429) on {url}, waiting {wait_time}s (attempt {attempt+1}/5)", "WARNING")
                     time.sleep(wait_time)
                 elif response.status_code in (503, 502, 504):
-                    wait_time = 10 * (attempt + 1)
+                    wait_time = 3 * (attempt + 1)
                     self.log(f"Server error {response.status_code} on {url}, waiting {wait_time}s", "WARNING")
                     time.sleep(wait_time)
                 else:
@@ -129,8 +148,19 @@ class LuxeDecorScraper:
         for attempt in range(5):
             try:
                 headers = {
-                    "Accept": "application/json, text/javascript, */*; q=0.01",
-                    "X-Requested-With": "XMLHttpRequest",
+                    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                    'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
+                    'cache-control': 'max-age=0',
+                    'priority': 'u=0, i',
+                    'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
+                    'sec-ch-ua-mobile': '?0',
+                    'sec-ch-ua-platform': '"macOS"',
+                    'sec-fetch-dest': 'document',
+                    'sec-fetch-mode': 'navigate',
+                    'sec-fetch-site': 'none',
+                    'sec-fetch-user': '?1',
+                    'upgrade-insecure-requests': '1',
+                    'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
                     "Referer": f"{self.curr_url}/",
                 }
                 response = self.session.get(url, headers=headers, timeout=15, verify=True)
