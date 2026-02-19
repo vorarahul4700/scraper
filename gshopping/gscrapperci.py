@@ -408,7 +408,7 @@ def scrape_product(driver, product_id, keyword, url, osb_url=""):
                 'competitors': []  # Already present
             }
         
-        time.sleep(random.uniform(5, 10))
+        time.sleep(random.uniform(4, 8))
         
         # Initialize result structure
         result = {
@@ -761,11 +761,11 @@ def process_chunk(chunk_file, chunk_id, total_chunks, round_id=1, output_dir='ou
             scraped_data['web_id'] = web_id
             scraped_data['keyword'] = keyword
             scraped_data['osb_url'] = osb_url
-            scraped_data['name'] = row.get('name','')
-            scraped_data['mpn_sku'] = row.get('mpn_sku', '')
-            scraped_data['gtin'] = row.get('gtin', '')
-            scraped_data['brand'] = row.get('brand', '')
-            scraped_data['category'] = row.get('category', '')
+            scraped_data['name'] = row['name']
+            scraped_data['mpn_sku'] = row['mpn_sku']
+            scraped_data['gtin'] = row['gtin']
+            scraped_data['brand'] = row['brand']
+            scraped_data['category'] = row['category']
             
             # Add to results
             product_results.append(scraped_data)
@@ -779,7 +779,7 @@ def process_chunk(chunk_file, chunk_id, total_chunks, round_id=1, output_dir='ou
             
             # Sleep between products
             if index < len(df) - 1:
-                time.sleep(random.uniform(3, 6))
+                time.sleep(random.uniform(1,3))
         
         # Close driver
         driver.quit()
