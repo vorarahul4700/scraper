@@ -117,23 +117,15 @@ jobs:
 
           echo ""
           echo "Generated files:"
-          ls -la media/output/scrapping/bloomingdales/bloomingdales_products_chunk_*.csv 2>/dev/null || echo "No CSV files generated"
+          ls -la bloomingdales_products_chunk_*.csv 2>/dev/null || echo "No CSV files generated"
 
       - name: Upload chunk artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: chunk_${{ matrix.offset }}
-          path: media/output/scrapping/bloomingdales/bloomingdales_products_chunk_*.csv
+          path: bloomingdales_products_chunk_*.csv
           if-no-files-found: warn
-
-      - name: Upload failure log (if any)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: failures_${{ matrix.offset }}
-          path: media/output/scrapping/failure_csv/bloomingdales_failures.csv
-          if-no-files-found: ignore
 
   # ============================================================
   # JOB 3 — MERGE: combine all chunk CSVs into one final file
