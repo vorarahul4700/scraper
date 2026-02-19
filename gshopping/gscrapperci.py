@@ -19,6 +19,31 @@ import argparse
 import re
 import shutil
 from urllib.parse import urlparse, unquote
+
+PRODUCT_FINAL_COLUMNS = [
+    "product_id",
+    "web_id",
+    "name",
+    "mpn_sku",
+    "gtin",
+    "brand",
+    "category",
+    "keyword",
+    "url",
+    "osb_url",
+    "last_response",
+    "osb_url_match",
+    "product_url",
+    "seller",
+    "product_name",
+    "cid",
+    "pid",
+    "last_fetched_date",
+    "osb_position",
+    "osb_id",
+    "seller_count",
+    "status",
+]
 # Import the existing captcha solving functions
 try:
     from solvecaptcha import solve_recaptcha_audio
@@ -629,7 +654,7 @@ def scrape_product(driver, product_id, keyword, url, osb_url=""):
             'competitors': []
         }
 
-def merge_csv_files(file_paths, output_path, sort_columns=None):
+def merge_csv_files(file_paths, output_path, sort_columns=None, expected_columns=None):
     """Merge CSV files into one output CSV."""
     valid_files = [p for p in file_paths if p and os.path.exists(p) and os.path.getsize(p) > 0]
     if not valid_files:
@@ -648,6 +673,11 @@ def merge_csv_files(file_paths, output_path, sort_columns=None):
         return None, 0
 
     merged_df = pd.concat(frames, ignore_index=True)
+    if expected_columns:
+        for col in expected_columns:
+            if col not in merged_df.columns:
+                merged_df[col] = ""
+        merged_df = merged_df.loc[:, expected_columns]
     if sort_columns:
         available_cols = [c for c in sort_columns if c in merged_df.columns]
         if available_cols:
@@ -729,11 +759,13 @@ def process_chunk(chunk_file, chunk_id, total_chunks, round_id=1, output_dir='ou
             
             # Add original fields back
             scraped_data['web_id'] = web_id
+            scraped_data['keyword'] = keyword
             scraped_data['osb_url'] = osb_url
-            scraped_data['name'] = row['Name']
-            scraped_data['mpn_sku'] = row['MPN/SKU']
-            scraped_data['gtin'] = row['GTIN']
-            scraped_data['brand'] = row['Brand']
+            scraped_data['name'] = row.get('name', row.get('Name', ''))
+            scraped_data['mpn_sku'] = row.get('mpn_sku', row.get('MPN/SKU', ''))
+            scraped_data['gtin'] = row.get('gtin', row.get('GTIN', ''))
+            scraped_data['brand'] = row.get('brand', row.get('Brand', ''))
+            scraped_data['category'] = row.get('category', row.get('Category', ''))
             
             # Add to results
             product_results.append(scraped_data)
@@ -768,6 +800,7 @@ def process_chunk(chunk_file, chunk_id, total_chunks, round_id=1, output_dir='ou
                 'mpn_sku' : result.get('mpn_sku',''),
                 'gtin' : result.get('gtin',''),
                 'brand' : result.get('brand',''),
+                'category': result.get('category', ''),
                 'keyword': result.get('keyword', ''),
                 'url': result.get('url', ''),
                 'osb_url': result.get('osb_url', ''),
@@ -816,7 +849,7 @@ def process_chunk(chunk_file, chunk_id, total_chunks, round_id=1, output_dir='ou
         csv3_path = os.path.join(output_dir, csv3_filename)
         
         if csv1_data:
-            pd.DataFrame(csv1_data).to_csv(csv1_path, index=False)
+            pd.DataFrame(csv1_data, columns=PRODUCT_FINAL_COLUMNS).to_csv(csv1_path, index=False)
             print(f"✓ Saved product info: {csv1_filename}")
         
         if csv2_data:
@@ -933,6 +966,7 @@ def run_recursive_pipeline(input_csv, total_chunks, ftp_host, ftp_user, ftp_pass
             round_product_files,
             os.path.join(round_dir, f"merged_products_round{round_id}.csv"),
             sort_columns=["product_id"],
+            expected_columns=PRODUCT_FINAL_COLUMNS,
         )
         round_seller_merged, round_seller_rows = merge_csv_files(
             round_seller_files,
@@ -981,6 +1015,7 @@ def run_recursive_pipeline(input_csv, total_chunks, ftp_host, ftp_user, ftp_pass
         all_product_files,
         os.path.join(run_root, f"merged_products_final_{run_ts}.csv"),
         sort_columns=["product_id"],
+        expected_columns=PRODUCT_FINAL_COLUMNS,
     )
     final_sellers_file, final_seller_rows = merge_csv_files(
         all_seller_files,

@@ -188,6 +188,30 @@ jobs:
           ftp_path = os.environ.get("FTP_PATH", "/scrap/")
           run_depth = int(os.environ.get("RUN_DEPTH", "1"))
           max_depth = int(os.environ.get("MAX_DEPTH", "10"))
+          PRODUCT_FINAL_COLUMNS = [
+              "product_id",
+              "web_id",
+              "name",
+              "mpn_sku",
+              "gtin",
+              "brand",
+              "category",
+              "keyword",
+              "url",
+              "osb_url",
+              "last_response",
+              "osb_url_match",
+              "product_url",
+              "seller",
+              "product_name",
+              "cid",
+              "pid",
+              "last_fetched_date",
+              "osb_position",
+              "osb_id",
+              "seller_count",
+              "status",
+          ]
 
           product_files = []
           seller_files = []
@@ -203,7 +227,7 @@ jobs:
                   elif f.endswith(".csv") and "gshopping_remaining_" in f and "chunk" in f:
                       remaining_files.append(p)
 
-          def merge_files(paths, out_name, sort_cols=None):
+          def merge_files(paths, out_name, sort_cols=None, expected_cols=None):
               frames = []
               for p in sorted(paths):
                   try:
@@ -215,6 +239,11 @@ jobs:
               if not frames:
                   return None, None
               df = pd.concat(frames, ignore_index=True)
+              if expected_cols:
+                  for col in expected_cols:
+                      if col not in df.columns:
+                          df[col] = ""
+                  df = df.loc[:, expected_cols]
               if sort_cols:
                   cols = [c for c in sort_cols if c in df.columns]
                   if cols:
@@ -222,7 +251,17 @@ jobs:
               df.to_csv(out_name, index=False)
               return out_name, df
 
-          round_products_file, round_products_df = merge_files(product_files, "round_products.csv", ["product_id"])
+          def normalize_product_columns(df):
+              if df is None:
+                  return None
+              for col in PRODUCT_FINAL_COLUMNS:
+                  if col not in df.columns:
+                      df[col] = ""
+              return df.loc[:, PRODUCT_FINAL_COLUMNS]
+
+          round_products_file, round_products_df = merge_files(
+              product_files, "round_products.csv", ["product_id"], expected_cols=PRODUCT_FINAL_COLUMNS
+          )
           round_sellers_file, round_sellers_df = merge_files(seller_files, "round_sellers.csv", ["product_id", "seller"])
           round_remaining_file, round_remaining_df = merge_files(remaining_files, "gshopping_remaining.csv", ["product_id"])
 
@@ -307,6 +346,8 @@ jobs:
 
           prev_products_df = load_prev_csv("gshopping_products_final.csv")
           prev_sellers_df = load_prev_csv("gshopping_sellers_final.csv")
+          round_products_df = normalize_product_columns(round_products_df)
+          prev_products_df = normalize_product_columns(prev_products_df)
 
           if prev_products_df is not None and unresolved_ids and "product_id" in prev_products_df.columns:
               prev_products_df = prev_products_df[
@@ -323,6 +364,7 @@ jobs:
 
           if product_frames:
               final_products_df = pd.concat(product_frames, ignore_index=True)
+              final_products_df = normalize_product_columns(final_products_df)
               if "product_id" in final_products_df.columns:
                   final_products_df["__pid"] = final_products_df["product_id"].astype(str).str.strip()
                   final_products_df = final_products_df.drop_duplicates(subset=["__pid"], keep="last").drop(columns=["__pid"])
