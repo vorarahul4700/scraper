@@ -761,11 +761,11 @@ def process_chunk(chunk_file, chunk_id, total_chunks, round_id=1, output_dir='ou
             scraped_data['web_id'] = web_id
             scraped_data['keyword'] = keyword
             scraped_data['osb_url'] = osb_url
-            scraped_data['name'] = row.get('name', row.get('Name', ''))
-            scraped_data['mpn_sku'] = row.get('mpn_sku', row.get('MPN/SKU', ''))
-            scraped_data['gtin'] = row.get('gtin', row.get('GTIN', ''))
-            scraped_data['brand'] = row.get('brand', row.get('Brand', ''))
-            scraped_data['category'] = row.get('category', row.get('Category', ''))
+            scraped_data['name'] = row.get('name','')
+            scraped_data['mpn_sku'] = row.get('mpn_sku', '')
+            scraped_data['gtin'] = row.get('gtin', '')
+            scraped_data['brand'] = row.get('brand', '')
+            scraped_data['category'] = row.get('category', '')
             
             # Add to results
             product_results.append(scraped_data)
