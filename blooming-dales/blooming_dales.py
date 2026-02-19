@@ -575,7 +575,8 @@ class BloomingDalesScraper:
                     "dimensions",
                     "materials",
                     "features",
-                    "image"
+                    "image",
+                    "scraped_date",
                 ])
                 
                 seen = set()
