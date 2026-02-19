@@ -236,13 +236,16 @@ def scrape_product_for_meta(driver, meta, search_url, start_offset=0, processed_
         time.sleep(random.uniform(1.0, 2.0))
         result["product_url"] = extract_share_url(driver) or driver.current_url
 
-        for _ in range(2):
+        # Expand all available store rows before collecting seller data.
+        max_more_store_clicks = 30
+        for _ in range(max_more_store_clicks):
             try:
-                more_stores = WebDriverWait(driver, 4).until(
+                more_stores = WebDriverWait(driver, 3).until(
                     EC.element_to_be_clickable((By.XPATH, "//div[contains(@class,'duf-h')]//div[@role='button']"))
                 )
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", more_stores)
                 more_stores.click()
-                time.sleep(random.uniform(1.2, 2.0))
+                time.sleep(random.uniform(1.0, 1.8))
             except Exception:
                 break
 
