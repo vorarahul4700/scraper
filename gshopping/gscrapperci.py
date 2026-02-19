@@ -17,6 +17,7 @@ import traceback
 import pandas as pd
 import argparse
 import re
+import shutil
 from urllib.parse import urlparse, unquote
 # Import the existing captcha solving functions
 try:
@@ -627,21 +628,81 @@ def scrape_product(driver, product_id, keyword, url, osb_url=""):
             'competitors': []
         }
 
-def process_chunk(chunk_file, chunk_id, total_chunks):
+def merge_csv_files(file_paths, output_path, sort_columns=None):
+    """Merge CSV files into one output CSV."""
+    valid_files = [p for p in file_paths if p and os.path.exists(p) and os.path.getsize(p) > 0]
+    if not valid_files:
+        return None, 0
+
+    frames = []
+    for path in valid_files:
+        try:
+            df = pd.read_csv(path)
+            if not df.empty:
+                frames.append(df)
+        except Exception as e:
+            print(f"Warning: Could not read {path}: {e}")
+
+    if not frames:
+        return None, 0
+
+    merged_df = pd.concat(frames, ignore_index=True)
+    if sort_columns:
+        available_cols = [c for c in sort_columns if c in merged_df.columns]
+        if available_cols:
+            merged_df = merged_df.sort_values(available_cols)
+
+    merged_df.to_csv(output_path, index=False)
+    return output_path, len(merged_df)
+
+
+def split_dataframe_to_chunk_files(df, output_dir, total_chunks, prefix):
+    """Split DataFrame into up to total_chunks chunk files and return file paths."""
+    os.makedirs(output_dir, exist_ok=True)
+    total_rows = len(df)
+    if total_rows == 0:
+        return []
+
+    chunk_count = max(1, min(int(total_chunks), total_rows))
+    base_size = total_rows // chunk_count
+    remainder = total_rows % chunk_count
+
+    chunk_files = []
+    start_idx = 0
+    for i in range(chunk_count):
+        extra = 1 if i < remainder else 0
+        end_idx = start_idx + base_size + extra
+        chunk_df = df.iloc[start_idx:end_idx]
+        if chunk_df.empty:
+            start_idx = end_idx
+            continue
+
+        chunk_file = os.path.join(output_dir, f"{prefix}_chunk_{i + 1}.csv")
+        chunk_df.to_csv(chunk_file, index=False)
+        chunk_files.append(chunk_file)
+        print(f"Prepared chunk {i + 1}/{chunk_count}: rows {start_idx + 1}-{end_idx}")
+        start_idx = end_idx
+
+    return chunk_files
+
+
+def process_chunk(chunk_file, chunk_id, total_chunks, round_id=1, output_dir='output'):
     """Process a chunk of products"""
     try:
-        # Get FTP credentials from environment
-        ftp_host = os.getenv('FTP_HOST')
-        ftp_user = os.getenv('FTP_USER')
-        ftp_pass = os.getenv('FTP_PASS')
-        ftp_path = os.getenv('FTP_PATH', '/scrap/')
-        
-        if not all([ftp_host, ftp_user, ftp_pass]):
-            print("Error: FTP credentials not found")
-            return False
-        
         # Read chunk file
         df = pd.read_csv(chunk_file)
+        if df.empty:
+            print(f"Chunk {chunk_id} is empty, skipping")
+            return {
+                "success": True,
+                "product_file": None,
+                "seller_file": None,
+                "remaining_file": None,
+                "product_rows": 0,
+                "seller_rows": 0,
+                "remaining_rows": 0,
+            }
+
         print(f"Processing {len(df)} products from chunk {chunk_id}")
         
         # Initialize results
@@ -714,23 +775,22 @@ def process_chunk(chunk_file, chunk_id, total_chunks):
         csv2_data = []
         for seller in seller_results:
             csv2_row = {
-                'product_id': seller['product_id'],
-                'seller': seller['seller'],
-                'seller_product_name': seller['seller_product_name'],
-                'seller_url': seller['seller_url'],
-                'seller_price': seller['seller_price'],
-                'last_fetched_date': seller['last_fetched_date']
+                'product_id': seller.get('product_id', ''),
+                'seller': seller.get('seller', ''),
+                'seller_product_name': seller.get('seller_product_name', ''),
+                'seller_url': seller.get('seller_url', ''),
+                'seller_price': seller.get('seller_price', ''),
+                'last_fetched_date': seller.get('last_fetched_date', '')
             }
             csv2_data.append(csv2_row)
         
         # Save CSV files locally
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = 'output'
         os.makedirs(output_dir, exist_ok=True)
         
-        csv1_filename = f"product_info_chunk{chunk_id}_{timestamp}.csv"
-        csv2_filename = f"seller_info_chunk{chunk_id}_{timestamp}.csv"
-        csv3_filename = f"gshopping_remaining_chunk{chunk_id}_{timestamp}.csv"
+        csv1_filename = f"product_info_round{round_id}_chunk{chunk_id}_{timestamp}.csv"
+        csv2_filename = f"seller_info_round{round_id}_chunk{chunk_id}_{timestamp}.csv"
+        csv3_filename = f"gshopping_remaining_round{round_id}_chunk{chunk_id}_{timestamp}.csv"
         
         csv1_path = os.path.join(output_dir, csv1_filename)
         csv2_path = os.path.join(output_dir, csv2_filename)
@@ -756,18 +816,184 @@ def process_chunk(chunk_file, chunk_id, total_chunks):
         #     upload_to_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, csv2_path, csv2_filename)
         
         print(f"\n✓ Chunk {chunk_id} processing completed")
-        return True
+        return {
+            "success": True,
+            "product_file": csv1_path if csv1_data else None,
+            "seller_file": csv2_path if csv2_data else None,
+            "remaining_file": csv3_path if remaining_results else None,
+            "product_rows": len(csv1_data),
+            "seller_rows": len(csv2_data),
+            "remaining_rows": len(remaining_results),
+        }
         
     except Exception as e:
         print(f"Error processing chunk {chunk_id}: {str(e)}")
         traceback.print_exc()
-        return False
+        return {
+            "success": False,
+            "product_file": None,
+            "seller_file": None,
+            "remaining_file": None,
+            "product_rows": 0,
+            "seller_rows": 0,
+            "remaining_rows": 0,
+        }
+
+
+def run_recursive_pipeline(input_csv, total_chunks, ftp_host, ftp_user, ftp_pass, ftp_path, max_rounds=10):
+    """Process chunks recursively until no remaining rows are left."""
+    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_root = os.path.join("output", f"recursive_run_{run_ts}")
+    rounds_root = os.path.join(run_root, "rounds")
+    os.makedirs(rounds_root, exist_ok=True)
+
+    all_product_files = []
+    all_seller_files = []
+    current_input = input_csv
+    round_id = 1
+
+    while round_id <= max_rounds:
+        print(f"\n{'=' * 60}")
+        print(f"Starting round {round_id}")
+        print(f"Input file: {current_input}")
+        print(f"{'=' * 60}")
+
+        try:
+            current_df = pd.read_csv(current_input)
+        except Exception as e:
+            print(f"Error reading round input file {current_input}: {e}")
+            return False
+
+        if current_df.empty:
+            print("No rows left to process. Ending recursion.")
+            break
+
+        round_dir = os.path.join(rounds_root, f"round_{round_id}")
+        os.makedirs(round_dir, exist_ok=True)
+
+        chunk_files = split_dataframe_to_chunk_files(
+            current_df,
+            output_dir=round_dir,
+            total_chunks=max(1, int(total_chunks)),
+            prefix=f"round_{round_id}",
+        )
+        if not chunk_files:
+            print("No chunks generated for current round. Ending recursion.")
+            break
+
+        round_product_files = []
+        round_seller_files = []
+        round_remaining_files = []
+        any_chunk_failed = False
+
+        for idx, chunk_file in enumerate(chunk_files, start=1):
+            chunk_result = process_chunk(
+                chunk_file=chunk_file,
+                chunk_id=idx,
+                total_chunks=len(chunk_files),
+                round_id=round_id,
+                output_dir=round_dir,
+            )
+            if not chunk_result.get("success"):
+                any_chunk_failed = True
+                continue
+
+            if chunk_result.get("product_file"):
+                round_product_files.append(chunk_result["product_file"])
+                all_product_files.append(chunk_result["product_file"])
+            if chunk_result.get("seller_file"):
+                round_seller_files.append(chunk_result["seller_file"])
+                all_seller_files.append(chunk_result["seller_file"])
+            if chunk_result.get("remaining_file"):
+                round_remaining_files.append(chunk_result["remaining_file"])
+
+        if any_chunk_failed:
+            print("One or more chunks failed in this round.")
+
+        round_product_merged, round_product_rows = merge_csv_files(
+            round_product_files,
+            os.path.join(round_dir, f"merged_products_round{round_id}.csv"),
+            sort_columns=["product_id"],
+        )
+        round_seller_merged, round_seller_rows = merge_csv_files(
+            round_seller_files,
+            os.path.join(round_dir, f"merged_sellers_round{round_id}.csv"),
+            sort_columns=["product_id", "seller"],
+        )
+        round_remaining_merged, round_remaining_rows = merge_csv_files(
+            round_remaining_files,
+            os.path.join(round_dir, f"gshopping_remaining_round{round_id}.csv"),
+            sort_columns=["product_id"],
+        )
+
+        # Upload round-level merged files only after the full round has finished.
+        if round_product_merged:
+            upload_to_ftp(
+                ftp_host, ftp_user, ftp_pass, ftp_path,
+                round_product_merged, os.path.basename(round_product_merged)
+            )
+        if round_seller_merged:
+            upload_to_ftp(
+                ftp_host, ftp_user, ftp_pass, ftp_path,
+                round_seller_merged, os.path.basename(round_seller_merged)
+            )
+        if round_remaining_merged:
+            upload_to_ftp(
+                ftp_host, ftp_user, ftp_pass, ftp_path,
+                round_remaining_merged, os.path.basename(round_remaining_merged)
+            )
+
+        print(
+            f"Round {round_id} summary: products={round_product_rows}, "
+            f"sellers={round_seller_rows}, remaining={round_remaining_rows}"
+        )
+
+        if not round_remaining_merged or round_remaining_rows == 0:
+            print("No remaining rows after this round. Recursive processing is complete.")
+            break
+
+        current_input = round_remaining_merged
+        round_id += 1
+
+    if round_id > max_rounds:
+        print(f"Reached max rounds limit ({max_rounds}). Stopping recursion.")
+
+    final_products_file, final_product_rows = merge_csv_files(
+        all_product_files,
+        os.path.join(run_root, f"merged_products_final_{run_ts}.csv"),
+        sort_columns=["product_id"],
+    )
+    final_sellers_file, final_seller_rows = merge_csv_files(
+        all_seller_files,
+        os.path.join(run_root, f"merged_sellers_final_{run_ts}.csv"),
+        sort_columns=["product_id", "seller"],
+    )
+
+    if final_products_file:
+        upload_to_ftp(
+            ftp_host, ftp_user, ftp_pass, ftp_path,
+            final_products_file, os.path.basename(final_products_file)
+        )
+    if final_sellers_file:
+        upload_to_ftp(
+            ftp_host, ftp_user, ftp_pass, ftp_path,
+            final_sellers_file, os.path.basename(final_sellers_file)
+        )
+
+    print("\nFinal merge summary:")
+    print(f"Final products: {final_product_rows} rows")
+    print(f"Final sellers:  {final_seller_rows} rows")
+    print(f"Output root:    {run_root}")
+
+    return bool(final_products_file or final_sellers_file)
 
 def main():
     parser = argparse.ArgumentParser(description='Google Shopping Scraper with Captcha Solving')
-    parser.add_argument('--chunk-id', type=int, required=True, help='Chunk ID (1-based)')
+    parser.add_argument('--chunk-id', type=int, default=1, help='Chunk ID (1-based)')
     parser.add_argument('--total-chunks', type=int, required=True, help='Total number of chunks')
     parser.add_argument('--input-file', type=str, required=True, help='Input CSV filename on FTP')
+    parser.add_argument('--recursive', action='store_true', help='Run recursive chunk processing until remaining is empty')
+    parser.add_argument('--max-rounds', type=int, default=10, help='Maximum recursive rounds')
     
     args = parser.parse_args()
     
@@ -775,9 +1001,10 @@ def main():
     print("Google Shopping Scraper with Captcha Solving")
     print(f"Chunk: {args.chunk_id} of {args.total_chunks}")
     print(f"Input file: {args.input_file}")
+    print(f"Recursive mode: {'Yes' if args.recursive else 'No'}")
     print("=" * 60)
     
-    # Get FTP credentials
+    
     ftp_host = os.getenv('FTP_HOST')
     ftp_user = os.getenv('FTP_USER')
     ftp_pass = os.getenv('FTP_PASS')
@@ -794,21 +1021,33 @@ def main():
         print("Failed to download input CSV")
         sys.exit(1)
     
-    # Split CSV and get our chunk
-    chunk_file = split_csv(input_csv, 'chunks', args.chunk_id, args.total_chunks)
-    if not chunk_file:
-        print("Failed to split CSV")
-        sys.exit(1)
-    
-    # Process the chunk
-    success = process_chunk(chunk_file, args.chunk_id, args.total_chunks)
-    
-    # Clean up
+    if args.recursive:
+        success = run_recursive_pipeline(
+            input_csv=input_csv,
+            total_chunks=args.total_chunks,
+            ftp_host=ftp_host,
+            ftp_user=ftp_user,
+            ftp_pass=ftp_pass,
+            ftp_path=ftp_path,
+            max_rounds=max(1, args.max_rounds),
+        )
+    else:
+        chunk_file = split_csv(input_csv, 'chunks', args.chunk_id, args.total_chunks)
+        if not chunk_file:
+            print("Failed to split CSV")
+            sys.exit(1)
+        
+        chunk_result = process_chunk(chunk_file, args.chunk_id, args.total_chunks)
+        success = chunk_result.get("success", False)
+        
+        try:
+            os.remove(chunk_file)
+            shutil.rmtree('chunks', ignore_errors=True)
+        except:
+            pass
+
     try:
         os.remove(input_csv)
-        os.remove(chunk_file)
-        import shutil
-        shutil.rmtree('chunks', ignore_errors=True)
     except:
         pass
     
