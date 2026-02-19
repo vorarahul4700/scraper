@@ -44,27 +44,6 @@ PRODUCT_FINAL_COLUMNS = [
     "seller_count",
     "status",
 ]
-
-INPUT_COLUMN_ALIASES = {
-    "product_id": ["product_id", "Product ID"],
-    "web_id": ["web_id", "Web ID"],
-    "name": ["name", "Name"],
-    "mpn_sku": ["mpn_sku", "MPN/SKU"],
-    "gtin": ["gtin", "GTIN"],
-    "brand": ["brand", "Brand"],
-    "category": ["category", "Category"],
-    "keyword": ["keyword", "Keyword"],
-    "url": ["url", "URL"],
-    "osb_url": ["osb_url", "OSB URL"],
-}
-
-
-def get_row_value(row, keys, default=""):
-    """Return first non-null value from a row for the provided keys."""
-    for key in keys:
-        if key in row and not pd.isna(row[key]):
-            return row[key]
-    return default
 # Import the existing captcha solving functions
 try:
     from solvecaptcha import solve_recaptcha_audio
@@ -767,11 +746,16 @@ def process_chunk(chunk_file, chunk_id, total_chunks, round_id=1, output_dir='ou
         
         # Process each product
         for index, row in df.iterrows():
-            product_id = get_row_value(row, INPUT_COLUMN_ALIASES["product_id"])
-            web_id = get_row_value(row, INPUT_COLUMN_ALIASES["web_id"])
-            keyword = get_row_value(row, INPUT_COLUMN_ALIASES["keyword"])
-            url = get_row_value(row, INPUT_COLUMN_ALIASES["url"])
-            osb_url = get_row_value(row, INPUT_COLUMN_ALIASES["osb_url"])
+            product_id = row['product_id']
+            web_id = row['web_id']
+            keyword = row['keyword']
+            url = row['url']
+            osb_url = row['osb_url']
+            name = row['name']
+            mpnsku = row['mpn_sku']
+            gtin = row['gtin']
+            brand = row['brand']
+            cat = row['category']
             
             print(f"\nProcessing {index+1}/{len(df)}: Product ID {product_id}")
             
@@ -782,11 +766,11 @@ def process_chunk(chunk_file, chunk_id, total_chunks, round_id=1, output_dir='ou
             scraped_data['web_id'] = web_id
             scraped_data['keyword'] = keyword
             scraped_data['osb_url'] = osb_url
-            scraped_data['name'] = get_row_value(row, INPUT_COLUMN_ALIASES["name"])
-            scraped_data['mpn_sku'] = get_row_value(row, INPUT_COLUMN_ALIASES["mpn_sku"])
-            scraped_data['gtin'] = get_row_value(row, INPUT_COLUMN_ALIASES["gtin"])
-            scraped_data['brand'] = get_row_value(row, INPUT_COLUMN_ALIASES["brand"])
-            scraped_data['category'] = get_row_value(row, INPUT_COLUMN_ALIASES["category"])
+            scraped_data['name'] = name
+            scraped_data['mpn_sku'] = mpnsku
+            scraped_data['gtin'] = gtin
+            scraped_data['brand'] = brand
+            scraped_data['category'] = cat
             
             # Add to results
             product_results.append(scraped_data)
@@ -998,6 +982,7 @@ def run_recursive_pipeline(input_csv, total_chunks, ftp_host, ftp_user, ftp_pass
             round_remaining_files,
             os.path.join(round_dir, f"gshopping_remaining_round{round_id}.csv"),
             sort_columns=["product_id"],
+            expected_columns=PRODUCT_FINAL_COLUMNS,
         )
 
         # Upload round-level merged files only after the full round has finished.

@@ -212,30 +212,6 @@ jobs:
               "seller_count",
               "status",
           ]
-          PRODUCT_COLUMN_ALIASES = {
-              "product_id": ["product_id", "Product ID"],
-              "web_id": ["web_id", "Web ID"],
-              "name": ["name", "Name"],
-              "mpn_sku": ["mpn_sku", "MPN/SKU"],
-              "gtin": ["gtin", "GTIN"],
-              "brand": ["brand", "Brand"],
-              "category": ["category", "Category"],
-              "keyword": ["keyword", "Keyword"],
-              "url": ["url", "URL"],
-              "osb_url": ["osb_url", "OSB URL"],
-              "last_response": ["last_response", "Last Response"],
-              "osb_url_match": ["osb_url_match", "OSB URL Match"],
-              "product_url": ["product_url", "Product URL"],
-              "seller": ["seller", "Seller"],
-              "product_name": ["product_name", "Product Name"],
-              "cid": ["cid", "CID"],
-              "pid": ["pid", "PID"],
-              "last_fetched_date": ["last_fetched_date", "Last Fetched Date"],
-              "osb_position": ["osb_position", "OSB Position"],
-              "osb_id": ["osb_id", "OSB ID"],
-              "seller_count": ["seller_count", "Seller Count"],
-              "status": ["status", "Status"],
-          }
 
           product_files = []
           seller_files = []
@@ -278,19 +254,14 @@ jobs:
           def normalize_product_columns(df):
               if df is None:
                   return None
-              for canonical_col, aliases in PRODUCT_COLUMN_ALIASES.items():
-                  if canonical_col in df.columns:
-                      continue
-                  for alias in aliases:
-                      if alias in df.columns:
-                          df[canonical_col] = df[alias]
-                          break
               for col in PRODUCT_FINAL_COLUMNS:
                   if col not in df.columns:
                       df[col] = ""
               return df.loc[:, PRODUCT_FINAL_COLUMNS]
 
-          round_products_file, round_products_df = merge_files(product_files, "round_products.csv", ["product_id"])
+          round_products_file, round_products_df = merge_files(
+              product_files, "round_products.csv", ["product_id"], expected_cols=PRODUCT_FINAL_COLUMNS
+          )
           round_sellers_file, round_sellers_df = merge_files(seller_files, "round_sellers.csv", ["product_id", "seller"])
           round_remaining_file, round_remaining_df = merge_files(remaining_files, "gshopping_remaining.csv", ["product_id"])
 
@@ -350,9 +321,7 @@ jobs:
           if round_remaining_df is not None and "product_id" in round_remaining_df.columns:
               unresolved_ids = set(round_remaining_df["product_id"].astype(str).str.strip().tolist())
 
-          round_products_df = normalize_product_columns(round_products_df)
           if round_products_df is not None:
-              round_products_df.to_csv("round_products.csv", index=False)
               if "status" in round_products_df.columns:
                   round_products_df = round_products_df[
                       round_products_df["status"].astype(str).str.strip().str.lower() != "captcha_failed"
@@ -377,6 +346,7 @@ jobs:
 
           prev_products_df = load_prev_csv("gshopping_products_final.csv")
           prev_sellers_df = load_prev_csv("gshopping_sellers_final.csv")
+          round_products_df = normalize_product_columns(round_products_df)
           prev_products_df = normalize_product_columns(prev_products_df)
 
           if prev_products_df is not None and unresolved_ids and "product_id" in prev_products_df.columns:
@@ -401,6 +371,7 @@ jobs:
                   final_products_df = final_products_df.sort_values(["product_id"])
               final_products_df.to_csv("gshopping_products_final.csv", index=False)
               ftp_upload("gshopping_products_final.csv", "gshopping_products_final.csv", subdir=final_subdir)
+              ftp_upload("gshopping_products_final.csv", "gshopping_products_final.csv")
 
           if seller_frames:
               final_sellers_df = pd.concat(seller_frames, ignore_index=True)
@@ -412,6 +383,7 @@ jobs:
                   final_sellers_df = final_sellers_df.sort_values(sort_cols)
               final_sellers_df.to_csv("gshopping_sellers_final.csv", index=False)
               ftp_upload("gshopping_sellers_final.csv", "gshopping_sellers_final.csv", subdir=final_subdir)
+              ftp_upload("gshopping_sellers_final.csv", "gshopping_sellers_final.csv")
 
           has_remaining = "false"
           next_input_filename = ""

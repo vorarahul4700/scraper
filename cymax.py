@@ -19,9 +19,9 @@ import json
 # ================= CONFIG =================
 CURR_URL = os.getenv("CURR_URL", "https://www.cymax.com").rstrip("/")
 SITEMAP_OFFSET = int(os.getenv("SITEMAP_OFFSET", "0"))
-MAX_PRODUCTS = int(os.getenv("MAX_PRODUCTS", "100"))
-MAX_WORKERS = min(int(os.getenv("MAX_WORKERS", "4")), 6)  # Max 6 workers
-REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY", "3.0"))
+MAX_PRODUCTS = int(os.getenv("MAX_PRODUCTS", "0"))
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))  # Max 6 workers
+REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY", "0.2"))
 
 OUTPUT_CSV = f"cymax_products_{SITEMAP_OFFSET}.csv"
 SCRAPED_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")
