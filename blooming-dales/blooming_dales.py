@@ -310,8 +310,8 @@ class BloomingDalesScraper:
     def extract_product_identifier(self, product_url: str) -> Optional[str]:
         """
         Extract product identifier from URL.
-        Example: https://www.bloomingdales.com/product/acme-furniture-bertie-end-table-casual-side-acf82842?phash=eff584
-        Returns: ACF82842
+        Example: https://www.bloomingdales.com/shop/product/lamarque-lace-maxi-skirt?ID=5827118
+        Returns: 5827118
         """
         parsed = urlparse(product_url)
         query_params = parse_qs(parsed.query)
@@ -519,6 +519,7 @@ class BloomingDalesScraper:
             # Step 1: Get sitemap URLs
             sitema_index = self.get_sitemap_urls_from_robots()
             index = self.load_xml(sitema_index)
+            
             if index is None:
                 self.log("Failed to load sitemap index", "ERROR")
                 sys.exit(1)
@@ -534,15 +535,12 @@ class BloomingDalesScraper:
                     sitemaps = [e.text.strip() for e in elements if e.text]
                     break
             
+            sitemaps = [url for url in sitemaps if "_pdp_" in url]
             # If still no sitemaps, try regex
             if not sitemaps:
                 self.log("No sitemaps found with XML parsing, trying regex", "WARNING")
-                # Try common Overstock sitemap patterns
-                sitemaps = [
-                    "https://www.overstock.com/sitemap_products_1.xml",
-                    "https://www.overstock.com/sitemap_products_2.xml",
-                    "https://www.overstock.com/sitemap.xml",
-                ]
+                return None
+            
             # Apply offset and limit
             if self.sitemap_offset >= len(sitemaps):
                 self.log(f"Offset {self.sitemap_offset} exceeds total sitemaps ({len(sitemaps)})", "WARNING")
