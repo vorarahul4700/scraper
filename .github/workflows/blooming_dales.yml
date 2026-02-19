@@ -21,7 +21,7 @@ on:
         default: "4"
       request_delay:
         description: "Delay between requests (seconds)"
-        default: 0.5"
+        default: "0.5"
 
 jobs:
   # ============================================================
