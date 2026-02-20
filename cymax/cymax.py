@@ -128,6 +128,17 @@ def parse_sitemap_xml(xml_text: str) -> Tuple[str, List[str]]:
     return "unknown", []
 
 
+def describe_xml_payload(xml_text: str) -> str:
+    text = maybe_unwrap_html_wrapped_text(xml_text)
+    snippet = re.sub(r"\s+", " ", text).strip()[:220]
+    try:
+        root = ET.fromstring(text)
+        root_name = get_localname(root.tag).lower()
+        return f"root_tag={root_name}, snippet={snippet}"
+    except ET.ParseError as exc:
+        return f"parse_error={exc}, snippet={snippet}"
+
+
 def is_product_url(url: str) -> bool:
     path = urlparse(url).path.lower()
     return path.endswith(".htm")
@@ -152,6 +163,7 @@ def discover_processing_sitemaps(
         url = root_sitemap_url.strip()
         if not url:
             continue
+        print(f"[INFO] Checking root sitemap URL: {url}")
 
         try:
             xml_text = fetch_with_flaresolverr(flaresolverr_url, url)
@@ -161,11 +173,14 @@ def discover_processing_sitemaps(
 
         sitemap_type, urls = parse_sitemap_xml(xml_text)
         if sitemap_type == "index":
+            print(f"[INFO] Root sitemap is sitemapindex: {url} ({len(urls)} child sitemaps)")
             discovered.extend(urls)
         elif sitemap_type == "urlset":
+            print(f"[INFO] Root sitemap is urlset: {url} ({len(urls)} urls)")
             discovered.append(url)
         else:
-            print(f"[WARN] Unsupported root sitemap XML: {url}")
+            details = describe_xml_payload(xml_text)
+            print(f"[WARN] Unsupported root sitemap XML: {url} | {details}")
 
     unique_discovered = list(dict.fromkeys(discovered))
     if not unique_discovered:
@@ -177,7 +192,10 @@ def discover_processing_sitemaps(
     else:
         end = None
 
-    return unique_discovered[start:end]
+    selected = unique_discovered[start:end]
+    for idx, s_url in enumerate(selected, start=start):
+        print(f"[INFO] Selected sitemap[{idx}]: {s_url}")
+    return selected
 
 
 def discover_product_urls_from_sitemaps(
@@ -194,6 +212,7 @@ def discover_product_urls_from_sitemaps(
         if not sitemap_url or sitemap_url in seen_sitemaps:
             continue
         seen_sitemaps.add(sitemap_url)
+        print(f"[INFO] Processing sitemap: {sitemap_url}")
 
         try:
             xml_text = fetch_with_flaresolverr(flaresolverr_url, sitemap_url)
@@ -203,6 +222,7 @@ def discover_product_urls_from_sitemaps(
 
         sitemap_type, urls = parse_sitemap_xml(xml_text)
         if sitemap_type == "index":
+            print(f"[INFO] Sitemap index found: {sitemap_url} ({len(urls)} child sitemaps)")
             for sub_sitemap in urls:
                 if sub_sitemap not in seen_sitemaps:
                     queue.append(sub_sitemap)
@@ -213,9 +233,18 @@ def discover_product_urls_from_sitemaps(
                     product_urls.add(url)
                     collected += 1
                     if max_urls_per_sitemap > 0 and collected >= max_urls_per_sitemap:
+                        print(
+                            f"[INFO] URL limit reached in {sitemap_url}: "
+                            f"{max_urls_per_sitemap}"
+                        )
                         break
+            print(
+                f"[INFO] Sitemap urlset processed: {sitemap_url} "
+                f"(total loc={len(urls)}, collected .htm={collected})"
+            )
         else:
-            print(f"[WARN] Unsupported or invalid sitemap XML: {sitemap_url}")
+            details = describe_xml_payload(xml_text)
+            print(f"[WARN] Unsupported or invalid sitemap XML: {sitemap_url} | {details}")
 
     return product_urls
 
