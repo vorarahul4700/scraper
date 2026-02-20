@@ -7,7 +7,7 @@ import sys
 from collections import deque
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 import xml.etree.ElementTree as ET
 
 import requests
@@ -61,12 +61,23 @@ def fetch_with_flaresolverr(
 
 
 def extract_sitemaps_from_robots(robots_text: str) -> List[str]:
-    # Stop URL capture before any HTML tag fragments and normalize common wrappers.
-    pattern = re.compile(r"^\s*Sitemap:\s*([^\s<]+)", flags=re.IGNORECASE | re.MULTILINE)
+    # Accept plain-text robots and HTML-wrapped robots responses.
+    pattern = re.compile(r"Sitemap:\s*([^\r\n]+)", flags=re.IGNORECASE)
     urls: List[str] = []
     for match in pattern.finditer(robots_text):
         raw = html.unescape(match.group(1).strip())
-        clean = raw.split("<", 1)[0].strip().rstrip(".,;")
+        decoded = unquote(raw)
+
+        # Keep only the first URL and cut any appended wrappers/garbage.
+        found = re.search(r"https?://\S+", decoded, flags=re.IGNORECASE)
+        if not found:
+            continue
+
+        clean = found.group(0).split("<", 1)[0].strip().rstrip(".,;")
+        xml_match = re.search(r"^(.+?\.xml(?:\.gz)?)", clean, flags=re.IGNORECASE)
+        if xml_match:
+            clean = xml_match.group(1)
+
         if clean:
             urls.append(clean)
     return urls
