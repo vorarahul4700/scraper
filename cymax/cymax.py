@@ -94,6 +94,21 @@ def maybe_unwrap_html_wrapped_text(content: str) -> str:
             if unwrapped:
                 return unwrapped
 
+    if "<html" in lower and "xml-viewer-style" in lower:
+        # Chromium XML viewer wraps XML in HTML. Pull the real XML document back out.
+        patterns = [
+            r"(<\?xml[^>]*\?>\s*<sitemapindex[\s\S]*?</sitemapindex>)",
+            r"(<\?xml[^>]*\?>\s*<urlset[\s\S]*?</urlset>)",
+            r"(<sitemapindex[\s\S]*?</sitemapindex>)",
+            r"(<urlset[\s\S]*?</urlset>)",
+        ]
+        for pat in patterns:
+            m = re.search(pat, text, flags=re.IGNORECASE)
+            if m:
+                xml_candidate = html.unescape(m.group(1)).strip().lstrip("\ufeff")
+                if xml_candidate:
+                    return xml_candidate
+
     return text
 
 
