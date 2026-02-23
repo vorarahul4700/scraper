@@ -17,33 +17,13 @@ import traceback
 import pandas as pd
 import argparse
 import re
-import shutil
 from urllib.parse import urlparse, unquote
+import concurrent.futures
+from threading import Lock
+import threading
+from queue import Queue
+import multiprocessing
 
-PRODUCT_FINAL_COLUMNS = [
-    "product_id",
-    "web_id",
-    "name",
-    "mpn_sku",
-    "gtin",
-    "brand",
-    "category",
-    "keyword",
-    "url",
-    "osb_url",
-    "last_response",
-    "osb_url_match",
-    "product_url",
-    "seller",
-    "product_name",
-    "cid",
-    "pid",
-    "last_fetched_date",
-    "osb_position",
-    "osb_id",
-    "seller_count",
-    "status",
-]
 # Import the existing captcha solving functions
 try:
     from solvecaptcha import solve_recaptcha_audio
@@ -65,7 +45,18 @@ except ImportError:
             print("Captcha solving module not available. Please install solvecaptcha.")
             return "failed"
 
-def setup_driver():
+# Thread-safe locks for file operations
+file_lock = Lock()
+stats_lock = Lock()
+
+# Global counters
+processed_count = 0
+success_count = 0
+failed_count = 0
+captcha_failed_count = 0
+
+def setup_driver(proxy=None):
+    """Setup Chrome driver with optional proxy"""
     time.sleep(2)
     options = uc.ChromeOptions()
     
@@ -91,6 +82,10 @@ def setup_driver():
     options.add_argument("--disable-features=IsolateOrigins,site-per-process")
     options.add_argument("--disable-site-isolation-trials")
 
+    # Add proxy if provided
+    if proxy:
+        options.add_argument(f'--proxy-server={proxy}')
+
     user_agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
@@ -99,9 +94,7 @@ def setup_driver():
     ]
     options.add_argument(f"user-agent={random.choice(user_agents)}")
 
-    
-    # driver = uc.Chrome(options=options)
-    driver = uc.Chrome(options=options,version_main=144)
+    driver = uc.Chrome(options=options, version_main=144)
     return driver
 
 def detects_recaptcha(driver):
@@ -117,13 +110,10 @@ def detects_recaptcha(driver):
                     print("reCAPTCHA iframe detected!")
                     return True
         else:
-            print("No reCAPTCHA found.")
             return False
     except Exception as e:
         print(f"Error detecting reCAPTCHA: {e}")
         return False
-
-# In your main gscrapperci.py, update the handle_captcha function:
 
 def handle_captcha(driver, url):
     """Handle captcha if detected with retry logic"""
@@ -141,40 +131,23 @@ def handle_captcha(driver, url):
                 return "solved"
             else:
                 print(f"Captcha solving attempt {attempt + 1} failed")
-                
-                # if attempt < max_retries - 1:
-                #     # Try refreshing the page
-                #     print("Refreshing page and retrying...")
-                #     driver.refresh()
-                #     time.sleep(5)
-                # else:
-                #     print("All captcha solving attempts failed")
-                #     return "failed"
                 print("All captcha solving attempts failed")
                 return "failed"
         else:
-            print("No reCAPTCHA found.")
             return "no_captcha"
     
     return "failed"
 
-def start_new_driver(search_url):
+def start_new_driver(search_url, proxy=None):
     """Start a new driver and handle captcha if present"""
     while True:
-        try:
-            driver.quit()
-        except:
-            pass
-        
-        driver = setup_driver()
+        driver = setup_driver(proxy)
         driver.get(search_url)
         
         # Handle captcha
         captcha_result = handle_captcha(driver, search_url)
         
-        if captcha_result == "solved":
-            return driver
-        elif captcha_result == "no_captcha":
+        if captcha_result == "solved" or captcha_result == "no_captcha":
             return driver
         else:
             # Captcha solving failed, retry with new driver
@@ -184,99 +157,6 @@ def start_new_driver(search_url):
             except:
                 pass
             time.sleep(random.uniform(5, 8))
-
-def download_csv_from_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, remote_filename, local_filename):
-    """Download CSV file from FTP"""
-    try:
-        print(f"Downloading {remote_filename} from FTP...")
-        
-        ftp = ftplib.FTP()
-        ftp.connect(ftp_host, int(os.getenv("FTP_PORT", 21)))
-        ftp.login(ftp_user, ftp_pass)
-        ftp.set_pasv(True)
-        
-        if ftp_path and ftp_path != '/':
-            try:
-                ftp.cwd(ftp_path)
-            except:
-                print(f"Error: Could not change to directory {ftp_path}")
-                return None
-        
-        with open(local_filename, 'wb') as f:
-            ftp.retrbinary(f'RETR {remote_filename}', f.write)
-        
-        ftp.quit()
-        print(f"✓ Downloaded {remote_filename} to {local_filename}")
-        return local_filename
-        
-    except Exception as e:
-        print(f"Error downloading from FTP: {str(e)}")
-        return None
-
-def upload_to_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, local_file, remote_filename):
-    """Upload file to FTP server"""
-    try:
-        print(f"Uploading {remote_filename} to FTP...")
-        
-        ftp = ftplib.FTP()
-        ftp.connect(ftp_host, 21)
-        ftp.login(ftp_user, ftp_pass)
-        ftp.set_pasv(True)
-        
-        if ftp_path and ftp_path != '/':
-            try:
-                ftp.cwd(ftp_path)
-            except:
-                dirs = ftp_path.strip('/').split('/')
-                current_path = ''
-                for dir in dirs:
-                    current_path += '/' + dir
-                    try:
-                        ftp.cwd(current_path)
-                    except:
-                        ftp.mkd(current_path)
-                        ftp.cwd(current_path)
-        
-        with open(local_file, 'rb') as f:
-            ftp.storbinary(f'STOR {remote_filename}', f)
-        
-        ftp.quit()
-        print(f"✓ Uploaded {remote_filename} to FTP")
-        return True
-        
-    except Exception as e:
-        print(f"Error uploading to FTP: {str(e)}")
-        return False
-
-def split_csv(input_csv, output_dir, chunk_id, total_chunks):
-    """Split CSV into chunks and return specific chunk"""
-    try:
-        df = pd.read_csv(input_csv)
-        
-        if df.empty:
-            print("CSV file is empty")
-            return None
-        
-        total_rows = len(df)
-        rows_per_chunk = total_rows // total_chunks
-        
-        start_idx = (chunk_id - 1) * rows_per_chunk
-        end_idx = chunk_id * rows_per_chunk if chunk_id < total_chunks else total_rows
-        
-        chunk_df = df.iloc[start_idx:end_idx]
-        
-        os.makedirs(output_dir, exist_ok=True)
-        chunk_filename = f"chunk_{chunk_id}.csv"
-        chunk_path = os.path.join(output_dir, chunk_filename)
-        
-        chunk_df.to_csv(chunk_path, index=False)
-        
-        print(f"Chunk {chunk_id}: Rows {start_idx+1} to {end_idx} ({len(chunk_df)} rows)")
-        return chunk_path
-        
-    except Exception as e:
-        print(f"Error splitting CSV: {str(e)}")
-        return None
 
 def get_product_options(driver):
     """Extract product variant options from the product panel"""
@@ -379,42 +259,61 @@ def normalize_url_path_slug(raw_url):
     except:
         return ""
 
-def scrape_product(driver, product_id, keyword, url, osb_url=""):
-    """Scrape individual product from Google Shopping"""
+def scrape_product(product_data, proxy=None):
+    """Scrape individual product from Google Shopping - to be run in parallel"""
+    global processed_count, success_count, failed_count, captcha_failed_count
+    
+    product_id = product_data['product_id']
+    web_id = product_data['web_id']
+    keyword = product_data['keyword']
+    url = product_data['url']
+    osb_url = product_data['osb_url']
+    
+    thread_id = threading.current_thread().name
+    print(f"\n[Thread {thread_id}] Scraping Product ID: {product_id}")
+    
+    driver = None
     try:
-        print(f"\nScraping Product ID: {product_id}")
-        print(f"Keyword: {keyword}")
-        
-        driver.get(url)
+        # Start driver for this product
+        driver = start_new_driver(url, proxy)
         
         # Handle captcha before proceeding
         captcha_result = handle_captcha(driver, url)
         if captcha_result == "failed":
-            return {
+            with stats_lock:
+                captcha_failed_count += 1
+                failed_count += 1
+            
+            result = {
                 'product_id': product_id,
+                'web_id': web_id,
                 'keyword': keyword,
                 'url': url,
+                'osb_url': osb_url,
                 'last_response': 'Captcha solving failed',
                 'status': 'captcha_failed',
                 'last_fetched_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'product_url': '',  # ADD THIS LINE
-                'seller': '',  # ADD THIS LINE
-                'product_name': '',  # ADD THIS LINE
-                'cid': '',  # ADD THIS LINE
-                'pid': '',  # ADD THIS LINE
-                'osb_position': 0,  # ADD THIS LINE
-                'osb_id': '',  # ADD THIS LINE
-                'seller_count': 0,  # ADD THIS LINE
-                'competitors': []  # Already present
+                'product_url': '',
+                'seller': '',
+                'product_name': '',
+                'cid': '',
+                'pid': '',
+                'osb_position': 0,
+                'osb_id': '',
+                'seller_count': 0,
+                'competitors': []
             }
+            return result, product_data
         
-        time.sleep(random.uniform(4, 8))
+        time.sleep(random.uniform(5, 10))
         
         # Initialize result structure
         result = {
             'product_id': product_id,
+            'web_id': web_id,
             'keyword': keyword,
             'url': url,
+            'osb_url': osb_url,
             'last_response': '',
             'product_url': '',
             'seller': '',
@@ -435,16 +334,20 @@ def scrape_product(driver, product_id, keyword, url, osb_url=""):
             result['last_response'] = "Product container found"
             result['status'] = "found"
         except Exception as e:
-            result['last_response'] = f"Product container not found: {str(e)[:20]}..."
+            result['last_response'] = f"Product container not found: {str(e)}"
             result['status'] = "container_not_found"
-            return result
+            with stats_lock:
+                failed_count += 1
+            return result, product_data
         
         # Find products in container
         products = mains.find_elements(By.CLASS_NAME, 'MtXiu')
         if not products:
             result['last_response'] = "No products found in container"
             result['status'] = "no_products"
-            return result
+            with stats_lock:
+                failed_count += 1
+            return result, product_data
         
         # Process first matching product
         for product in products:
@@ -479,7 +382,9 @@ def scrape_product(driver, product_id, keyword, url, osb_url=""):
         if not result['product_name']:
             result['last_response'] = "No matching product found"
             result['status'] = "no_match"
-            return result
+            with stats_lock:
+                failed_count += 1
+            return result, product_data
         
         # Click on product if CID exists
         if result['cid']:
@@ -566,7 +471,7 @@ def scrape_product(driver, product_id, keyword, url, osb_url=""):
                 result['options'] = product_options
             
             offer_elements = offers_grid.find_elements(By.CLASS_NAME, 'R5K7Cb')
-            print(f"Found {len(offer_elements)} offers")
+            print(f"[Thread {thread_id}] Found {len(offer_elements)} offers for product {product_id}")
             
             competitors = []
             for seller_html in offer_elements:
@@ -631,186 +536,250 @@ def scrape_product(driver, product_id, keyword, url, osb_url=""):
                 'seller_count': seller_count,
                 'osb_id': osb_id,
                 'status': 'completed',
-                'osb_url_match': f'{"Yes" if osb_url_match else "No"}',
-                'last_response': f'Completed - OSB Position: {osb_position}, Total Sellers: {seller_count}'
+                'last_response': f'Completed - OSB Position: {osb_position}, Total Sellers: {seller_count}, OSB URL Match: {"Yes" if osb_url_match else "No"}'
             })
+            
+            with stats_lock:
+                success_count += 1
             
         except Exception as e:
             result['status'] = 'no_offers_found'
             result['last_response'] = f'No offers found: {str(e)}'
+            with stats_lock:
+                failed_count += 1
         
-        return result
+        with stats_lock:
+            processed_count += 1
+            print(f"\n[Thread {thread_id}] Progress: {processed_count} processed, {success_count} successful, {failed_count} failed, {captcha_failed_count} captcha failed")
+        
+        return result, product_data
         
     except Exception as e:
-        print(f"Error scraping product {product_id}: {str(e)}")
+        print(f"[Thread {thread_id}] Error scraping product {product_id}: {str(e)}")
         traceback.print_exc()
-        return {
+        with stats_lock:
+            failed_count += 1
+        
+        result = {
             'product_id': product_id,
+            'web_id': web_id,
             'keyword': keyword,
             'url': url,
+            'osb_url': osb_url,
             'last_response': f'Error: {str(e)}',
             'status': 'error',
             'last_fetched_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'product_url': '',
+            'seller': '',
+            'product_name': '',
+            'cid': '',
+            'pid': '',
+            'osb_position': 0,
+            'osb_id': '',
+            'seller_count': 0,
             'competitors': []
         }
+        return result, product_data
+        
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
 
-def merge_csv_files(file_paths, output_path, sort_columns=None, expected_columns=None):
-    """Merge CSV files into one output CSV."""
-    valid_files = [p for p in file_paths if p and os.path.exists(p) and os.path.getsize(p) > 0]
-    if not valid_files:
-        return None, 0
-
-    frames = []
-    for path in valid_files:
-        try:
-            df = pd.read_csv(path)
-            if not df.empty:
-                frames.append(df)
-        except Exception as e:
-            print(f"Warning: Could not read {path}: {e}")
-
-    if not frames:
-        return None, 0
-
-    merged_df = pd.concat(frames, ignore_index=True)
-    if expected_columns:
-        for col in expected_columns:
-            if col not in merged_df.columns:
-                merged_df[col] = ""
-        merged_df = merged_df.loc[:, expected_columns]
-    if sort_columns:
-        available_cols = [c for c in sort_columns if c in merged_df.columns]
-        if available_cols:
-            merged_df = merged_df.sort_values(available_cols)
-
-    merged_df.to_csv(output_path, index=False)
-    return output_path, len(merged_df)
-
-
-def split_dataframe_to_chunk_files(df, output_dir, total_chunks, prefix):
-    """Split DataFrame into up to total_chunks chunk files and return file paths."""
-    os.makedirs(output_dir, exist_ok=True)
-    total_rows = len(df)
-    if total_rows == 0:
-        return []
-
-    chunk_count = max(1, min(int(total_chunks), total_rows))
-    base_size = total_rows // chunk_count
-    remainder = total_rows % chunk_count
-
-    chunk_files = []
-    start_idx = 0
-    for i in range(chunk_count):
-        extra = 1 if i < remainder else 0
-        end_idx = start_idx + base_size + extra
-        chunk_df = df.iloc[start_idx:end_idx]
-        if chunk_df.empty:
-            start_idx = end_idx
-            continue
-
-        chunk_file = os.path.join(output_dir, f"{prefix}_chunk_{i + 1}.csv")
-        chunk_df.to_csv(chunk_file, index=False)
-        chunk_files.append(chunk_file)
-        print(f"Prepared chunk {i + 1}/{chunk_count}: rows {start_idx + 1}-{end_idx}")
-        start_idx = end_idx
-
-    return chunk_files
-
-
-def process_chunk(chunk_file, chunk_id, total_chunks, round_id=1, output_dir='output'):
-    """Process a chunk of products"""
+def download_csv_from_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, remote_filename, local_filename):
+    """Download CSV file from FTP"""
     try:
+        print(f"Downloading {remote_filename} from FTP...")
+        
+        ftp = ftplib.FTP()
+        ftp.connect(ftp_host, int(os.getenv("FTP_PORT", 21)))
+        ftp.login(ftp_user, ftp_pass)
+        ftp.set_pasv(True)
+        
+        if ftp_path and ftp_path != '/':
+            try:
+                ftp.cwd(ftp_path)
+            except:
+                print(f"Error: Could not change to directory {ftp_path}")
+                return None
+        
+        with open(local_filename, 'wb') as f:
+            ftp.retrbinary(f'RETR {remote_filename}', f.write)
+        
+        ftp.quit()
+        print(f"✓ Downloaded {remote_filename} to {local_filename}")
+        return local_filename
+        
+    except Exception as e:
+        print(f"Error downloading from FTP: {str(e)}")
+        return None
+
+def upload_to_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, local_file, remote_filename):
+    """Upload file to FTP server"""
+    try:
+        print(f"Uploading {remote_filename} to FTP...")
+        
+        ftp = ftplib.FTP()
+        ftp.connect(ftp_host, 21)
+        ftp.login(ftp_user, ftp_pass)
+        ftp.set_pasv(True)
+        
+        if ftp_path and ftp_path != '/':
+            try:
+                ftp.cwd(ftp_path)
+            except:
+                dirs = ftp_path.strip('/').split('/')
+                current_path = ''
+                for dir in dirs:
+                    current_path += '/' + dir
+                    try:
+                        ftp.cwd(current_path)
+                    except:
+                        ftp.mkd(current_path)
+                        ftp.cwd(current_path)
+        
+        with open(local_file, 'rb') as f:
+            ftp.storbinary(f'STOR {remote_filename}', f)
+        
+        ftp.quit()
+        print(f"✓ Uploaded {remote_filename} to FTP")
+        return True
+        
+    except Exception as e:
+        print(f"Error uploading to FTP: {str(e)}")
+        return False
+
+def split_csv(input_csv, output_dir, chunk_id, total_chunks):
+    """Split CSV into chunks and return specific chunk"""
+    try:
+        df = pd.read_csv(input_csv)
+        
+        if df.empty:
+            print("CSV file is empty")
+            return None
+        
+        total_rows = len(df)
+        rows_per_chunk = total_rows // total_chunks
+        
+        start_idx = (chunk_id - 1) * rows_per_chunk
+        end_idx = chunk_id * rows_per_chunk if chunk_id < total_chunks else total_rows
+        
+        chunk_df = df.iloc[start_idx:end_idx]
+        
+        os.makedirs(output_dir, exist_ok=True)
+        chunk_filename = f"chunk_{chunk_id}.csv"
+        chunk_path = os.path.join(output_dir, chunk_filename)
+        
+        chunk_df.to_csv(chunk_path, index=False)
+        
+        print(f"Chunk {chunk_id}: Rows {start_idx+1} to {end_idx} ({len(chunk_df)} rows)")
+        return chunk_path
+        
+    except Exception as e:
+        print(f"Error splitting CSV: {str(e)}")
+        return None
+
+def process_chunk_parallel(chunk_file, chunk_id, total_chunks, max_workers=None):
+    """Process a chunk of products in parallel"""
+    global processed_count, success_count, failed_count, captcha_failed_count
+    
+    try:
+        # Reset counters
+        processed_count = 0
+        success_count = 0
+        failed_count = 0
+        captcha_failed_count = 0
+        
+        # Get FTP credentials from environment
+        ftp_host = os.getenv('FTP_HOST')
+        ftp_user = os.getenv('FTP_USER')
+        ftp_pass = os.getenv('FTP_PASS')
+        ftp_path = os.getenv('FTP_PATH', '/scrap/')
+        
+        if not all([ftp_host, ftp_user, ftp_pass]):
+            print("Error: FTP credentials not found")
+            return False
+        
         # Read chunk file
         df = pd.read_csv(chunk_file)
-        if df.empty:
-            print(f"Chunk {chunk_id} is empty, skipping")
-            return {
-                "success": True,
-                "product_file": None,
-                "seller_file": None,
-                "remaining_file": None,
-                "product_rows": 0,
-                "seller_rows": 0,
-                "remaining_rows": 0,
-            }
-
-        print(f"Processing {len(df)} products from chunk {chunk_id}")
+        print(f"\nProcessing {len(df)} products from chunk {chunk_id}")
         
-        # Initialize results
-        product_results = []
-        seller_results = []
+        # Determine number of workers (default: CPU count * 2)
+        if max_workers is None:
+            max_workers = min(multiprocessing.cpu_count() * 2, len(df))
+            # Cap at reasonable number to avoid overwhelming the system
+            max_workers = min(max_workers, 5)
+        
+        print(f"Using {max_workers} parallel workers")
+        
+        # Prepare product data for parallel processing
+        products_to_process = []
+        for _, row in df.iterrows():
+            product_data = {
+                'product_id': row['product_id'],
+                'web_id': row['web_id'],
+                'keyword': row['keyword'],
+                'url': row['url'],
+                'osb_url': row['osb_url']
+            }
+            products_to_process.append(product_data)
+        
+        # Initialize results containers
+        all_product_results = []
+        all_seller_results = []
         remaining_results = []
         
-        # Setup driver
-        driver = setup_driver()
+        # Process products in parallel
+        start_time = time.time()
         
-        # Process each product
-        for index, row in df.iterrows():
-            product_id = row['product_id']
-            web_id = row['web_id']
-            keyword = row['keyword']
-            url = row['url']
-            osb_url = row['osb_url']
-            name = row['name']
-            mpnsku = row['mpn_sku']
-            gtin = row['gtin']
-            brand = row['brand']
-            cat = row['category']
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="Scraper") as executor:
+            # Submit all tasks
+            future_to_product = {
+                executor.submit(scrape_product, product_data): product_data 
+                for product_data in products_to_process
+            }
             
-            print(f"\nProcessing {index+1}/{len(df)}: Product ID {product_id}")
-            
-            # Scrape product
-            scraped_data = scrape_product(driver, product_id, keyword, url, osb_url)
-            
-            # Add original fields back
-            scraped_data['web_id'] = web_id
-            scraped_data['keyword'] = keyword
-            scraped_data['osb_url'] = osb_url
-            scraped_data['name'] = name
-            scraped_data['mpn_sku'] = mpnsku
-            scraped_data['gtin'] = gtin
-            scraped_data['brand'] = brand
-            scraped_data['category'] = cat
-            
-            # Add to results
-            product_results.append(scraped_data)
-            seller_results.extend(scraped_data['competitors'])
-            if str(scraped_data.get('status', '')).strip().lower() in {'captcha_failed', 'error'}:
-                remaining_row = {
-                    col: ('' if pd.isna(row[col]) else row[col])
-                    for col in df.columns
-                }
-                remaining_results.append(remaining_row)
-            
-            # Sleep between products
-            if index < len(df) - 1:
-                time.sleep(random.uniform(1,3))
+            # Process completed futures as they come in
+            for future in concurrent.futures.as_completed(future_to_product):
+                product_data = future_to_product[future]
+                try:
+                    product_result, original_row = future.result(timeout=300)  # 5 minute timeout
+                    
+                    # Add to results
+                    with file_lock:
+                        all_product_results.append(product_result)
+                        all_seller_results.extend(product_result['competitors'])
+                        
+                        # Check if we need to retry this product
+                        if product_result.get('status') == 'captcha_failed':
+                            remaining_results.append(original_row)
+                    
+                except concurrent.futures.TimeoutError:
+                    print(f"Timeout processing product {product_data['product_id']}")
+                    with file_lock:
+                        failed_count += 1
+                        # Add to remaining for retry
+                        remaining_results.append(product_data)
+                except Exception as e:
+                    print(f"Error processing product {product_data['product_id']}: {str(e)}")
+                    with file_lock:
+                        failed_count += 1
         
-        # Close driver
-        driver.quit()
+        elapsed_time = time.time() - start_time
+        print(f"\nParallel processing completed in {elapsed_time:.2f} seconds")
         
-        # Keep only non-remaining results in round outputs.
-        completed_product_results = [
-            r for r in product_results
-            if str(r.get('status', '')).strip().lower() not in {'captcha_failed', 'error'}
-        ]
-
         # Create CSV 1: Product Information
         csv1_data = []
-        for result in completed_product_results:
+        for result in all_product_results:
             csv1_row = {
                 'product_id': result.get('product_id', ''),
                 'web_id': result.get('web_id', ''),
-                'name' : result.get('name',''),
-                'mpn_sku' : result.get('mpn_sku',''),
-                'gtin' : result.get('gtin',''),
-                'brand' : result.get('brand',''),
-                'category': result.get('category', ''),
                 'keyword': result.get('keyword', ''),
                 'url': result.get('url', ''),
                 'osb_url': result.get('osb_url', ''),
                 'last_response': result.get('last_response', ''),
-                'osb_url_match' : result.get('osb_url_match', ''),
                 'product_url': result.get('product_url', ''),
                 'seller': result.get('seller', ''),
                 'product_name': result.get('product_name', ''),
@@ -827,45 +796,43 @@ def process_chunk(chunk_file, chunk_id, total_chunks, round_id=1, output_dir='ou
         
         # Create CSV 2: Seller Information
         csv2_data = []
-        completed_product_ids = {str(r.get('product_id', '')).strip() for r in completed_product_results}
-        for seller in seller_results:
-            if str(seller.get('product_id', '')).strip() not in completed_product_ids:
-                continue
+        for seller in all_seller_results:
             csv2_row = {
-                'product_id': seller.get('product_id', ''),
-                'seller': seller.get('seller', ''),
-                'seller_product_name': seller.get('seller_product_name', ''),
-                'seller_url': seller.get('seller_url', ''),
-                'seller_price': seller.get('seller_price', ''),
-                'last_fetched_date': seller.get('last_fetched_date', '')
+                'product_id': seller['product_id'],
+                'seller': seller['seller'],
+                'seller_product_name': seller['seller_product_name'],
+                'seller_url': seller['seller_url'],
+                'seller_price': seller['seller_price'],
+                'last_fetched_date': seller['last_fetched_date']
             }
             csv2_data.append(csv2_row)
         
         # Save CSV files locally
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = 'output'
         os.makedirs(output_dir, exist_ok=True)
         
-        csv1_filename = f"product_info_round{round_id}_chunk{chunk_id}_{timestamp}.csv"
-        csv2_filename = f"seller_info_round{round_id}_chunk{chunk_id}_{timestamp}.csv"
-        csv3_filename = f"gshopping_remaining_round{round_id}_chunk{chunk_id}_{timestamp}.csv"
+        csv1_filename = f"product_info_chunk{chunk_id}_{timestamp}.csv"
+        csv2_filename = f"seller_info_chunk{chunk_id}_{timestamp}.csv"
+        csv3_filename = f"gshopping_remaining_chunk{chunk_id}_{timestamp}.csv"
         
         csv1_path = os.path.join(output_dir, csv1_filename)
         csv2_path = os.path.join(output_dir, csv2_filename)
         csv3_path = os.path.join(output_dir, csv3_filename)
         
         if csv1_data:
-            pd.DataFrame(csv1_data, columns=PRODUCT_FINAL_COLUMNS).to_csv(csv1_path, index=False)
-            print(f"✓ Saved product info: {csv1_filename}")
+            pd.DataFrame(csv1_data).to_csv(csv1_path, index=False)
+            print(f"✓ Saved product info: {csv1_filename} ({len(csv1_data)} records)")
         
         if csv2_data:
             pd.DataFrame(csv2_data).to_csv(csv2_path, index=False)
-            print(f"✓ Saved seller info: {csv2_filename}")
+            print(f"✓ Saved seller info: {csv2_filename} ({len(csv2_data)} records)")
 
         if remaining_results:
             pd.DataFrame(remaining_results).to_csv(csv3_path, index=False)
-            print(f"✓ Saved remaining rows: {csv3_filename}")
+            print(f"✓ Saved remaining rows: {csv3_filename} ({len(remaining_results)} records)")
         
-        # Upload to FTP STOPPED TO AVOID UNNECESSARY FTP USAGE DURING TESTING
+        # Upload to FTP (commented out to avoid unnecessary FTP usage during testing)
         # if csv1_data:
         #     upload_to_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, csv1_path, csv1_filename)
         
@@ -873,198 +840,31 @@ def process_chunk(chunk_file, chunk_id, total_chunks, round_id=1, output_dir='ou
         #     upload_to_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, csv2_path, csv2_filename)
         
         print(f"\n✓ Chunk {chunk_id} processing completed")
-        return {
-            "success": True,
-            "product_file": csv1_path if csv1_data else None,
-            "seller_file": csv2_path if csv2_data else None,
-            "remaining_file": csv3_path if remaining_results else None,
-            "product_rows": len(csv1_data),
-            "seller_rows": len(csv2_data),
-            "remaining_rows": len(remaining_results),
-        }
+        print(f"  Total: {processed_count} | Success: {success_count} | Failed: {failed_count} | Captcha Failed: {captcha_failed_count}")
+        return True
         
     except Exception as e:
         print(f"Error processing chunk {chunk_id}: {str(e)}")
         traceback.print_exc()
-        return {
-            "success": False,
-            "product_file": None,
-            "seller_file": None,
-            "remaining_file": None,
-            "product_rows": 0,
-            "seller_rows": 0,
-            "remaining_rows": 0,
-        }
-
-
-def run_recursive_pipeline(input_csv, total_chunks, ftp_host, ftp_user, ftp_pass, ftp_path, max_rounds=10):
-    """Process chunks recursively until no remaining rows are left."""
-    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_root = os.path.join("output", f"recursive_run_{run_ts}")
-    rounds_root = os.path.join(run_root, "rounds")
-    os.makedirs(rounds_root, exist_ok=True)
-
-    all_product_files = []
-    all_seller_files = []
-    current_input = input_csv
-    round_id = 1
-
-    while round_id <= max_rounds:
-        print(f"\n{'=' * 60}")
-        print(f"Starting round {round_id}")
-        print(f"Input file: {current_input}")
-        print(f"{'=' * 60}")
-
-        try:
-            current_df = pd.read_csv(current_input)
-        except Exception as e:
-            print(f"Error reading round input file {current_input}: {e}")
-            return False
-
-        if current_df.empty:
-            print("No rows left to process. Ending recursion.")
-            break
-
-        round_dir = os.path.join(rounds_root, f"round_{round_id}")
-        os.makedirs(round_dir, exist_ok=True)
-
-        chunk_files = split_dataframe_to_chunk_files(
-            current_df,
-            output_dir=round_dir,
-            total_chunks=max(1, int(total_chunks)),
-            prefix=f"round_{round_id}",
-        )
-        if not chunk_files:
-            print("No chunks generated for current round. Ending recursion.")
-            break
-
-        round_product_files = []
-        round_seller_files = []
-        round_remaining_files = []
-        any_chunk_failed = False
-
-        for idx, chunk_file in enumerate(chunk_files, start=1):
-            chunk_result = process_chunk(
-                chunk_file=chunk_file,
-                chunk_id=idx,
-                total_chunks=len(chunk_files),
-                round_id=round_id,
-                output_dir=round_dir,
-            )
-            if not chunk_result.get("success"):
-                any_chunk_failed = True
-                continue
-
-            if chunk_result.get("product_file"):
-                round_product_files.append(chunk_result["product_file"])
-                all_product_files.append(chunk_result["product_file"])
-            if chunk_result.get("seller_file"):
-                round_seller_files.append(chunk_result["seller_file"])
-                all_seller_files.append(chunk_result["seller_file"])
-            if chunk_result.get("remaining_file"):
-                round_remaining_files.append(chunk_result["remaining_file"])
-
-        if any_chunk_failed:
-            print("One or more chunks failed in this round.")
-
-        round_product_merged, round_product_rows = merge_csv_files(
-            round_product_files,
-            os.path.join(round_dir, f"merged_products_round{round_id}.csv"),
-            sort_columns=["product_id"],
-            expected_columns=PRODUCT_FINAL_COLUMNS,
-        )
-        round_seller_merged, round_seller_rows = merge_csv_files(
-            round_seller_files,
-            os.path.join(round_dir, f"merged_sellers_round{round_id}.csv"),
-            sort_columns=["product_id", "seller"],
-        )
-        round_remaining_merged, round_remaining_rows = merge_csv_files(
-            round_remaining_files,
-            os.path.join(round_dir, f"gshopping_remaining_round{round_id}.csv"),
-            sort_columns=["product_id"],
-            expected_columns=PRODUCT_FINAL_COLUMNS,
-        )
-
-        # Upload round-level merged files only after the full round has finished.
-        if round_product_merged:
-            upload_to_ftp(
-                ftp_host, ftp_user, ftp_pass, ftp_path,
-                round_product_merged, os.path.basename(round_product_merged)
-            )
-        if round_seller_merged:
-            upload_to_ftp(
-                ftp_host, ftp_user, ftp_pass, ftp_path,
-                round_seller_merged, os.path.basename(round_seller_merged)
-            )
-        if round_remaining_merged:
-            upload_to_ftp(
-                ftp_host, ftp_user, ftp_pass, ftp_path,
-                round_remaining_merged, os.path.basename(round_remaining_merged)
-            )
-
-        print(
-            f"Round {round_id} summary: products={round_product_rows}, "
-            f"sellers={round_seller_rows}, remaining={round_remaining_rows}"
-        )
-
-        if not round_remaining_merged or round_remaining_rows == 0:
-            print("No remaining rows after this round. Recursive processing is complete.")
-            break
-
-        current_input = round_remaining_merged
-        round_id += 1
-
-    if round_id > max_rounds:
-        print(f"Reached max rounds limit ({max_rounds}). Stopping recursion.")
-
-    final_products_file, final_product_rows = merge_csv_files(
-        all_product_files,
-        os.path.join(run_root, f"merged_products_final_{run_ts}.csv"),
-        sort_columns=["product_id"],
-        expected_columns=PRODUCT_FINAL_COLUMNS,
-    )
-    final_sellers_file, final_seller_rows = merge_csv_files(
-        all_seller_files,
-        os.path.join(run_root, f"merged_sellers_final_{run_ts}.csv"),
-        sort_columns=["product_id", "seller"],
-    )
-
-    if final_products_file:
-        upload_to_ftp(
-            ftp_host, ftp_user, ftp_pass, ftp_path,
-            final_products_file, os.path.basename(final_products_file)
-        )
-    if final_sellers_file:
-        upload_to_ftp(
-            ftp_host, ftp_user, ftp_pass, ftp_path,
-            final_sellers_file, os.path.basename(final_sellers_file)
-        )
-
-    print("\nFinal merge summary:")
-    print(f"Final products: {final_product_rows} rows")
-    print(f"Final sellers:  {final_seller_rows} rows")
-    print(f"Output root:    {run_root}")
-
-    return bool(final_products_file or final_sellers_file)
+        return False
 
 def main():
-    parser = argparse.ArgumentParser(description='Google Shopping Scraper with Captcha Solving')
-    parser.add_argument('--chunk-id', type=int, default=1, help='Chunk ID (1-based)')
+    parser = argparse.ArgumentParser(description='Google Shopping Scraper with Parallel Processing')
+    parser.add_argument('--chunk-id', type=int, required=True, help='Chunk ID (1-based)')
     parser.add_argument('--total-chunks', type=int, required=True, help='Total number of chunks')
     parser.add_argument('--input-file', type=str, required=True, help='Input CSV filename on FTP')
-    parser.add_argument('--recursive', action='store_true', help='Run recursive chunk processing until remaining is empty')
-    parser.add_argument('--max-rounds', type=int, default=10, help='Maximum recursive rounds')
+    parser.add_argument('--workers', type=int, default=None, help='Number of parallel workers (default: auto)')
     
     args = parser.parse_args()
     
     print("=" * 60)
-    print("Google Shopping Scraper with Captcha Solving")
+    print("Google Shopping Scraper with Parallel Processing")
     print(f"Chunk: {args.chunk_id} of {args.total_chunks}")
     print(f"Input file: {args.input_file}")
-    print(f"Recursive mode: {'Yes' if args.recursive else 'No'}")
+    print(f"Parallel workers: {args.workers if args.workers else 'auto'}")
     print("=" * 60)
     
-
+    # Get FTP credentials
     ftp_host = os.getenv('FTP_HOST')
     ftp_user = os.getenv('FTP_USER')
     ftp_pass = os.getenv('FTP_PASS')
@@ -1081,33 +881,21 @@ def main():
         print("Failed to download input CSV")
         sys.exit(1)
     
-    if args.recursive:
-        success = run_recursive_pipeline(
-            input_csv=input_csv,
-            total_chunks=args.total_chunks,
-            ftp_host=ftp_host,
-            ftp_user=ftp_user,
-            ftp_pass=ftp_pass,
-            ftp_path=ftp_path,
-            max_rounds=max(1, args.max_rounds),
-        )
-    else:
-        chunk_file = split_csv(input_csv, 'chunks', args.chunk_id, args.total_chunks)
-        if not chunk_file:
-            print("Failed to split CSV")
-            sys.exit(1)
-        
-        chunk_result = process_chunk(chunk_file, args.chunk_id, args.total_chunks)
-        success = chunk_result.get("success", False)
-        
-        try:
-            os.remove(chunk_file)
-            shutil.rmtree('chunks', ignore_errors=True)
-        except:
-            pass
-
+    # Split CSV and get our chunk
+    chunk_file = split_csv(input_csv, 'chunks', args.chunk_id, args.total_chunks)
+    if not chunk_file:
+        print("Failed to split CSV")
+        sys.exit(1)
+    
+    # Process the chunk in parallel
+    success = process_chunk_parallel(chunk_file, args.chunk_id, args.total_chunks, args.workers)
+    
+    # Clean up
     try:
         os.remove(input_csv)
+        os.remove(chunk_file)
+        import shutil
+        shutil.rmtree('chunks', ignore_errors=True)
     except:
         pass
     
