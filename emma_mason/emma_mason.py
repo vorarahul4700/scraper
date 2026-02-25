@@ -125,9 +125,20 @@ class emmamasonScraper:
                         "Upgrade-Insecure-Requests": "1",
                         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
                     }
-                    r = self.session.get(url, headers=headers, impersonate="chrome124", timeout=15, verify=True)
+                    r = self.session.get(
+                        url,
+                        headers=headers,
+                        timeout=15,
+                        verify=True,
+                        impersonate="chrome124",
+                    )
                 else:
-                    r = self.session.get(url, timeout=15, impersonate="chrome124", verify=True)
+                    r = self.session.get(
+                        url,
+                        timeout=15,
+                        verify=True,
+                        impersonate="chrome124",
+                    )
 
                 if r.status_code == 200:
                     self.log(f"Success: {url}", "DEBUG")
