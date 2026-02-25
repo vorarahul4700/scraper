@@ -14,7 +14,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 import urllib3
-from utils.logger import Logger
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -237,7 +236,6 @@ class unlimitedFurnitureScraper:
         results: List[Dict] = []
 
         for script in soup.find_all("script", type="application/ld+json"):
-            Logger.write(script)
             try:
                 raw = script.string
                 if not raw:
