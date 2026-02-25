@@ -18,14 +18,14 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
-class unlimitedFurnitureScraper:
+class emmamasonScraper:
 
     # ============================================================
     #  Init — all config + shared state
     # ============================================================
 
     def __init__(self):
-        self.curr_url             = os.getenv("CURR_URL", "https://www.unlimitedfurnituregroup.com").rstrip("/")
+        self.curr_url             = os.getenv("CURR_URL", "https://www.emmamason.com").rstrip("/")
         self.api_base_url         = os.getenv("API_BASE_URL", "").rstrip("/")
         self.sitemap_offset       = int(os.getenv("SITEMAP_OFFSET", "0"))
         self.max_sitemaps         = int(os.getenv("MAX_SITEMAPS", "0"))
@@ -33,10 +33,10 @@ class unlimitedFurnitureScraper:
         self.max_workers          = int(os.getenv("MAX_WORKERS", "4"))
         self.request_delay        = float(os.getenv("REQUEST_DELAY", "1.0"))
 
-        self.output_dir   = "media/output/scrapping/unlimitedfurniture"
+        self.output_dir   = "media/output/scrapping/emmamason"
         self.failure_dir  = "media/output/scrapping/failure_csv"
-        self.output_csv   = f"unlimitedfurniture_products_chunk_{self.sitemap_offset}.csv"
-        self.skipped_plp_csv = f"unlimitedfurniture_skipped_plp_{self.sitemap_offset}.csv"
+        self.output_csv   = f"emmamason_products_chunk_{self.sitemap_offset}.csv"
+        self.skipped_plp_csv = f"emmamason_skipped_plp_{self.sitemap_offset}.csv"
         self.scraped_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
         self.csv_header = [
@@ -166,7 +166,7 @@ class unlimitedFurnitureScraper:
             self.log(f"Failed to load XML from {url}", "ERROR")
             return None
 
-        # unlimitedfurniture injects <script/> into the sitemap index which breaks XML parsing
+        # emmamason injects <script/> into the sitemap index which breaks XML parsing
         # Simply strip it out before parsing — same as ovr.py approach
         data = re.sub(r'<script[^>]*/>', '', data)
         data = re.sub(r'<script[^>]*>.*?</script>', '', data, flags=re.DOTALL)
@@ -197,7 +197,7 @@ class unlimitedFurnitureScraper:
         return []
 
     def get_product_urls(self, sitemap_url: str) -> List[str]:
-        """Parse a product sitemap and return only unlimitedfurniture /ip/ URLs."""
+        """Parse a product sitemap and return only emmamason /ip/ URLs."""
         ns  = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
         xml = self.load_xml(sitemap_url)
         if not xml:
@@ -237,8 +237,8 @@ class unlimitedFurnitureScraper:
     #  Product Extraction
     # ============================================================
 
-    def extract_unlimitedfurniture_data(self, soup: BeautifulSoup, url: str) -> List[Dict]:
-        """Parse JSON-LD blocks from a unlimitedfurniture page. Returns one dict per data."""
+    def extract_emmamason_data(self, soup: BeautifulSoup, url: str) -> List[Dict]:
+        """Parse JSON-LD blocks from a emmamason page. Returns one dict per data."""
         # product_id = self.extract_product_id(url)
         results: List[Dict] = []
 
@@ -287,7 +287,7 @@ class unlimitedFurnitureScraper:
                     "status":                "In Stock",
                     "competitor_price":      price,
                     "group_attr_1":          data.get("description", ""),
-                    "group_attr_2":          "",
+                    "group_attr_2":          data.get("material", ""),
                     "main_image":            self.normalize_image(main_image),
                     "competitor_url":        url,
                     "scraped_date":          self.scraped_date,
@@ -332,7 +332,7 @@ class unlimitedFurnitureScraper:
     def log_failure(self, url: str, reason: str):
         """Append a failed URL to the failure CSV."""
         os.makedirs(self.failure_dir, exist_ok=True)
-        failure_path = os.path.join(self.failure_dir, "unlimitedfurniture_failures.csv")
+        failure_path = os.path.join(self.failure_dir, "emmamason_failures.csv")
         file_exists  = os.path.isfile(failure_path)
         with self.fail_lock:
             with open(failure_path, "a", newline="", encoding="utf-8") as f:
@@ -366,7 +366,7 @@ class unlimitedFurnitureScraper:
         return '/' in path
 
     def process_product(self, product_url: str, writer: csv.writer):
-        """Fetch, extract, and save one unlimitedfurniture product URL."""
+        """Fetch, extract, and save one emmamason product URL."""
         if self._is_plp_url(product_url):
             self.stats["plp_urls_skipped"] += 1
             self.log_skipped_plp(product_url)
@@ -387,7 +387,7 @@ class unlimitedFurnitureScraper:
             return
 
         soup     = BeautifulSoup(html, "html.parser")
-        products = self.extract_unlimitedfurniture_data(soup, base_url)
+        products = self.extract_emmamason_data(soup, base_url)
 
         if not products:
             self.stats["errors"] += 1
@@ -417,7 +417,7 @@ class unlimitedFurnitureScraper:
 
     def run(self):
         self.log("=" * 60)
-        self.log("unlimitedfurniture Parallel Bulk Scraper")
+        self.log("emmamason Parallel Bulk Scraper")
         self.log(f"Timestamp:            {self.scraped_date}")
         self.log(f"Base URL:             {self.curr_url}")
         self.log(f"Sitemap Offset:       {self.sitemap_offset}")
@@ -502,4 +502,4 @@ if __name__ == "__main__":
         sys.stderr.write("[ERROR] CURR_URL environment variable is required\n")
         sys.exit(1)
 
-    unlimitedFurnitureScraper().run()
+    emmamasonScraper().run()
