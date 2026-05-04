@@ -10,28 +10,28 @@ on:
         type: string
       total_sitemaps:
         description: "Total sitemaps to process (0 = auto-detect)"
-        default: "0"
+        default: 0
         type: number
       sitemaps_per_job:
         description: "Sitemaps per parallel job"
-        default: "2"
+        default: 2
         type: number
       urls_per_sitemap:
         description: "Max URLs per sitemap (0 = all)"
-        default: "500"
+        default: 500
         type: number
       max_workers:
         description: "Max concurrent workers per job"
-        default: "3"
+        default: 3
         type: number
       max_rounds:
         description: "Max recursion rounds (workflow re-triggers)"
-        default: "5"
+        default: 5
         type: number
       # ── Internal inputs (set automatically on re-trigger, do NOT set manually) ──
       current_round:
         description: "[Internal] Current recursion round"
-        default: "1"
+        default: 1
         type: number
       remaining_run_id:
         description: "[Internal] Run ID that produced the merged remaining CSV"
@@ -45,12 +45,12 @@ permissions:
 
 env:
   # Expose inputs as env vars so every job/step can read them easily
-  WEBSITE_URL:      ${{ github.event.inputs.website_url }}
+  WEBSITE_URL: ${{ github.event.inputs.website_url }}
   SITEMAPS_PER_JOB: ${{ github.event.inputs.sitemaps_per_job }}
   URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap }}
-  MAX_WORKERS:      ${{ github.event.inputs.max_workers }}
-  MAX_ROUNDS:       ${{ github.event.inputs.max_rounds }}
-  CURRENT_ROUND:    ${{ github.event.inputs.current_round }}
+  MAX_WORKERS: ${{ github.event.inputs.max_workers }}
+  MAX_ROUNDS: ${{ github.event.inputs.max_rounds }}
+  CURRENT_ROUND: ${{ github.event.inputs.current_round }}
   REMAINING_RUN_ID: ${{ github.event.inputs.remaining_run_id }}
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -60,10 +60,10 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
-      matrix:      ${{ steps.build_matrix.outputs.matrix }}
-      domain:      ${{ steps.domain.outputs.domain }}
-      mode:        ${{ steps.build_matrix.outputs.mode }}
-      total_jobs:  ${{ steps.build_matrix.outputs.total_jobs }}
+      matrix: ${{ steps.build_matrix.outputs.matrix }}
+      domain: ${{ steps.domain.outputs.domain }}
+      mode: ${{ steps.build_matrix.outputs.mode }}
+      total_jobs: ${{ steps.build_matrix.outputs.total_jobs }}
 
     steps:
       # ── Extract clean domain name ──────────────────────────────────────────
@@ -232,11 +232,11 @@ jobs:
       # ── Single scrape run — NO internal retry loop ─────────────────────────
       - name: Run scraper (single pass)
         env:
-          CURR_URL:           ${{ matrix.url }}
-          SITEMAP_OFFSET:     ${{ matrix.offset || '0' }}
-          MAX_SITEMAPS:       ${{ matrix.limit  || '0' }}
+          CURR_URL: ${{ matrix.url }}
+          SITEMAP_OFFSET: ${{ matrix.offset || '0' }}
+          MAX_SITEMAPS: ${{ matrix.limit  || '0' }}
           MAX_URLS_PER_SITEMAP: ${{ env.URLS_PER_SITEMAP }}
-          MAX_WORKERS:        ${{ env.MAX_WORKERS }}
+          MAX_WORKERS: ${{ env.MAX_WORKERS }}
         run: |
           MODE="${{ matrix.mode }}"
           JOB_IDX="${{ matrix.job_index }}"
@@ -323,7 +323,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: result_job${{ matrix.job_index }}_r${{ env.CURRENT_ROUND }}
-          path: output/result_${{ matrix.domain }}_job${{ matrix.job_index }}_r${{ env.CURRENT_ROUND }}.csv
+          path: output/result_${{ matrix.domain }}_job${{ matrix.job_index }}_r${{
+            env.CURRENT_ROUND }}.csv
           retention-days: 3
 
       # ── Upload per-job remaining URLs ──────────────────────────────────────
@@ -344,13 +345,13 @@ jobs:
 
   # ── MERGE ─────────────────────────────────────────────────────────────────
   merge:
-    needs: [plan, scrape]
+    needs: [ plan, scrape ]
     if: always() && needs.plan.outputs.mode != 'empty'
     runs-on: ubuntu-latest
     outputs:
-      filename:          ${{ steps.meta.outputs.name }}
-      has_remaining:     ${{ steps.check_remaining.outputs.has_remaining }}
-      remaining_count:   ${{ steps.check_remaining.outputs.remaining_count }}
+      filename: ${{ steps.meta.outputs.name }}
+      has_remaining: ${{ steps.check_remaining.outputs.has_remaining }}
+      remaining_count: ${{ steps.check_remaining.outputs.remaining_count }}
 
     steps:
       # ── Download all per-job result artifacts ─────────────────────────────
@@ -494,11 +495,11 @@ jobs:
       - name: Upload to FTP server
         if: success()
         env:
-          FTP_HOST:     ${{ secrets.FTP_HOST }}
-          FTP_USER:     ${{ secrets.FTP_USER }}
-          FTP_PASS:     ${{ secrets.FTP_PASS }}
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
           FTP_BASE_DIR: ${{ secrets.FTP_PATH }}
-          FILE:         ${{ steps.meta.outputs.name }}
+          FILE: ${{ steps.meta.outputs.name }}
         run: |
           echo "=== Uploading to FTP === File: $FILE"
           sudo apt-get update -q && sudo apt-get install -y -q lftp
@@ -538,11 +539,11 @@ jobs:
 
   # ── RE-TRIGGER (next round) ───────────────────────────────────────────────
   trigger_next_round:
-    needs: [merge]
+    needs: [ merge ]
     # Only re-trigger when: there are remaining URLs AND we haven't hit max rounds
     if: |
       needs.merge.outputs.has_remaining == 'true' &&
-      github.event.inputs.current_round < github.event.inputs.max_rounds
+      fromJson(github.event.inputs.current_round) < fromJson(github.event.inputs.max_rounds)
     runs-on: ubuntu-latest
 
     steps:
