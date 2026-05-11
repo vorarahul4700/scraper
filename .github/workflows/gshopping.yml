@@ -250,6 +250,10 @@ jobs:
               "osb_id",
               "seller_count",
               "status",
+              "product_about_info",
+              "main_image",
+              "description",
+              "attributes",
           ]
 
           product_files = []

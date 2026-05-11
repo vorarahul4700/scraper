@@ -45,7 +45,10 @@ PRODUCT_FINAL_COLUMNS = [
     "osb_id",
     "seller_count",
     "status",
-    "product_about_info"  # ← ADD THIS LINE
+    "product_about_info",
+    "main_image",
+    "description",
+    "attributes"
 ]
 # Import the existing captcha solving functions
 try:
@@ -295,7 +298,10 @@ def build_error_result(product_id, keyword, url, message, status="error"):
         'osb_id': '',
         'seller_count': 0,
         'competitors': [],
-        'product_about_info': json.dumps({})
+        'product_about_info': json.dumps({}),
+        'main_image': '',
+        'description': '',
+        'attributes': json.dumps({})
     }
 
 def save_remaining_df(df, chunk_id, round_id, output_dir, reason=None):
@@ -580,7 +586,8 @@ def get_product_about_info(driver):
     """
     product_info = {
         'description': '',
-        'attributes': {}
+        'attributes': {},
+        'main_image': ''
     }
     
     try:
@@ -602,11 +609,88 @@ def get_product_about_info(driver):
             desc_element = about_section.find_element(By.XPATH, ".//div[@jsname='yKDmZd']")
             product_info['description'] = desc_element.text.strip()
         except:
-            try:
-                desc_element = about_section.find_element(By.XPATH, ".//div[contains(@class,'iERlS')]")
-                product_info['description'] = desc_element.text.strip()
-            except:
-                pass
+            pass
+
+        # Extract main image
+        try:
+            print("Attempting to extract main image...")
+            # Comprehensive list of selectors for main image in Google Shopping panel
+            # Based on user-provided HTML: img class "KfAt4d" inside div class "DqsAAd"
+            image_selectors = [
+                "//img[@class='KfAt4d']",
+                "//div[@class='DqsAAd']//img",
+                "//div[@jsname='figiqf']//img",
+                "//div[@jsname='SAt90e']//img",
+                "//div[contains(@class,'m8U2Z')]//img",
+                "//div[@class='hB4fJb']//img",
+                "//img[contains(@class,'sh-div__image')]",
+                "//div[@class='L8S89c']//img",
+                "//div[@class='B08B9']//img",
+                "//div[contains(@class,'sh-div__image-container')]//img",
+                "//div[@id='sh-div__image-container']//img",
+                "//img[@id='sh-div__main-image']",
+                "//img[contains(@class, 'r429ob')]",
+                "//div[contains(@class, 'FLY67')]//img",
+                "//div[contains(@class, 'sh-ds__image-container')]//img"
+            ]
+            
+            for selector in image_selectors:
+                try:
+                    # Increase wait slightly for high-res images
+                    img_element = WebDriverWait(driver, 4).until(
+                        EC.presence_of_element_located((By.XPATH, selector))
+                    )
+                    
+                    # Try srcset first for higher quality, then src
+                    img_url = img_element.get_attribute('srcset')
+                    if img_url:
+                        # Pick the first URL in srcset
+                        img_url = img_url.split(',')[0].split(' ')[0]
+                    
+                    if not img_url:
+                        img_url = img_element.get_attribute('src')
+                        
+                    if img_url and not img_url.startswith('data:'):
+                        product_info['main_image'] = img_url
+                        print(f"✓ Found main image: {img_url[:60]}...")
+                        break
+                except:
+                    continue
+            
+            # Final fallback: scan all images in the panel and pick the largest one
+            if not product_info['main_image']:
+                print("Using aggressive image fallback...")
+                try:
+                    # Look for images in the main panel area
+                    all_imgs = driver.find_elements(By.XPATH, "//div[@jsname='HhYL2b']//img | //div[@jsname='SAt90e']//img | //div[contains(@class, 'm8U2Z')]//img | //div[@class='DqsAAd']//img")
+                    print(f"Found {len(all_imgs)} images in panel area")
+                    best_img = None
+                    max_area = 0
+                    
+                    for img in all_imgs:
+                        try:
+                            src = img.get_attribute('src')
+                            if not src or src.startswith('data:'):
+                                continue
+                                
+                            w = int(img.get_attribute('width') or 0)
+                            h = int(img.get_attribute('height') or 0)
+                            area = w * h
+                            print(f"  - Image: {src[:40]}... (Size: {w}x{h})")
+                            
+                            if area > max_area and w > 100:
+                                max_area = area
+                                best_img = src
+                        except:
+                            continue
+                    
+                    if best_img:
+                        product_info['main_image'] = best_img
+                        print(f"✓ Found main image via aggressive fallback: {best_img[:60]}...")
+                except Exception as fe:
+                    print(f"Aggressive fallback failed: {str(fe)}")
+        except Exception as e:
+            print(f"Error extracting main image: {str(e)}")
         
         # Check if "More details" button exists and click it
         try:
@@ -832,11 +916,19 @@ def populate_offers_for_selected_product(driver, result, product_id, osb_url):
 
     # ★ NEW: Add product about info scraping
     try:
-        result['product_about_info'] = get_product_about_info(driver)
-        print("✓ Product about info extracted")
+        about_data_json = get_product_about_info(driver)
+        about_data = json.loads(about_data_json)
+        result['product_about_info'] = about_data_json
+        result['description'] = about_data.get('description', '')
+        result['attributes'] = json.dumps(about_data.get('attributes', {}))
+        result['main_image'] = about_data.get('main_image', '')
+        print("✓ Product about info, description, attributes and image extracted")
     except Exception as e:
         print(f"Error extracting product about info: {str(e)}")
-        result['product_about_info'] = json.dumps({'description': '', 'attributes': {}})
+        result['product_about_info'] = json.dumps({'description': '', 'attributes': {}, 'main_image': ''})
+        result['description'] = ''
+        result['attributes'] = json.dumps({})
+        result['main_image'] = ''
 
     offer_elements = offers_grid.find_elements(By.CLASS_NAME, 'R5K7Cb')
     print(f"Found {len(offer_elements)} offers")
@@ -1064,7 +1156,10 @@ def scrape_product(driver, product_id, keyword, url, osb_url=""):
                 'osb_id': '',  # ADD THIS LINE
                 'seller_count': 0,  # ADD THIS LINE
                 'competitors': [],  # Already present
-                'product_about_info': json.dumps({})  # ← ADD THIS LINE
+                'product_about_info': json.dumps({}),
+                'main_image': '',
+                'description': '',
+                'attributes': json.dumps({})
             }
         
         time.sleep(random.uniform(4, 8))
@@ -1086,7 +1181,10 @@ def scrape_product(driver, product_id, keyword, url, osb_url=""):
             'seller_count': 0,
             'status': '',
             'competitors': [],
-            'product_about_info': ''  # ← ADD THIS LINE
+            'product_about_info': '',
+            'main_image': '',
+            'description': '',
+            'attributes': ''
         }
         
         try:
@@ -1302,7 +1400,19 @@ def process_chunk(chunk_file, chunk_id, total_chunks, round_id=1, output_dir='ou
                 # Add to results
                 product_results.append(scraped_data)
                 seller_results.extend(scraped_data.get('competitors', []))
-                if str(scraped_data.get('status', '')).strip().lower() in {'captcha_failed', 'error'}:
+                
+                status_lower = str(scraped_data.get('status', '')).strip().lower()
+                if status_lower == 'captcha_failed':
+                    print(f"!!! CAPTCHA DETECTED on Product {product_id}. Skipping remaining {len(df) - index} products in this chunk to avoid further blocks.")
+                    # Add current product and all subsequent products in the chunk to remaining_results
+                    remaining_df_part = df.iloc[index:]
+                    for _, r_row in remaining_df_part.iterrows():
+                        remaining_results.append({
+                            col: ('' if pd.isna(r_row[col]) else r_row[col])
+                            for col in df.columns
+                        })
+                    break  # Stop processing this chunk
+                elif status_lower == 'error':
                     remaining_row = {
                         col: ('' if pd.isna(row[col]) else row[col])
                         for col in df.columns
@@ -1351,7 +1461,10 @@ def process_chunk(chunk_file, chunk_id, total_chunks, round_id=1, output_dir='ou
                 'osb_id': result.get('osb_id', ''),
                 'seller_count': result.get('seller_count', 0),
                 'status': result.get('status', 'error'),
-                'product_about_info': result.get('product_about_info', json.dumps({}))  # ← ADD THIS LINE
+                'product_about_info': result.get('product_about_info', json.dumps({})),
+                'main_image': result.get('main_image', ''),
+                'description': result.get('description', ''),
+                'attributes': result.get('attributes', json.dumps({}))
             }
             csv1_data.append(csv1_row)
         
@@ -1618,11 +1731,17 @@ def main():
         print("Please set FTP_HOST, FTP_USER, FTP_PASS environment variables")
         sys.exit(1)
     
-    # Download input CSV from FTP
+    # Use local file if it exists, otherwise download from FTP
     input_csv = 'input.csv'
-    if not download_csv_from_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, args.input_file, input_csv):
-        print("Failed to download input CSV")
-        sys.exit(1)
+    if os.path.exists(args.input_file):
+        print(f"Using local file: {args.input_file}")
+        if args.input_file != input_csv:
+            import shutil
+            shutil.copy2(args.input_file, input_csv)
+    else:
+        if not download_csv_from_ftp(ftp_host, ftp_user, ftp_pass, ftp_path, args.input_file, input_csv):
+            print("Failed to download input CSV")
+            sys.exit(1)
     
     if args.recursive:
         success = run_recursive_pipeline(
