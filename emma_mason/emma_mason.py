@@ -80,24 +80,6 @@ class emmamasonScraper:
         }
 
         self.session = requests.Session()
-        self.session.headers.update({
-            "method": "GET",
-            "scheme": "https",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br, zstd",
-            "Accept-Language": "en-US,en;q=0.8",
-            "Cache-Control": "max-age=0",
-            "Priority": "u=0, i",
-            "Sec-Ch-Ua": '"Brave";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"Linux"',
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Gpc": "1",
-            "Upgrade-Insecure-Requests": "1",
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        })
 
     # ============================================================
     #  Logger
@@ -113,56 +95,31 @@ class emmamasonScraper:
     # ============================================================
 
     def http_get(self, url: str, is_json: bool = False) -> Optional[str]:
-        """GET with up to 3 retries. Switches headers for JSON vs HTML requests."""
+        """GET with up to 3 retries and browser impersonation."""
+        impersonate_targets = ["chrome124", "chrome120", "safari17_0"]
         for attempt in range(3):
+            impersonate = impersonate_targets[attempt % len(impersonate_targets)]
             try:
-                if is_json:
-                    headers = {
-                        "method": "GET",
-                        "scheme": "https",
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                        "Accept-Encoding": "gzip, deflate, br, zstd",
-                        "Accept-Language": "en-US,en;q=0.8",
-                        "Cache-Control": "max-age=0",
-                        "Priority": "u=0, i",
-                        "Sec-Ch-Ua": '"Brave";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
-                        "Sec-Ch-Ua-Mobile": "?0",
-                        "Sec-Ch-Ua-Platform": '"Linux"',
-                        "Sec-Fetch-Dest": "empty",
-                        "Sec-Fetch-Mode": "navigate",
-                        "Sec-Fetch-Site": "same-origin",
-                        "Sec-Gpc": "1",
-                        "Upgrade-Insecure-Requests": "1",
-                        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-                    }
-                    r = self.session.get(
-                        url,
-                        headers=headers,
-                        timeout=15,
-                        verify=True,
-                        impersonate="chrome124",
-                    )
-                else:
-                    r = self.session.get(
-                        url,
-                        timeout=15,
-                        verify=True,
-                        impersonate="chrome124",
-                    )
+                r = self.session.get(
+                    url,
+                    timeout=20,
+                    verify=True,
+                    impersonate=impersonate,
+                )
 
                 if r.status_code == 200:
                     self.log(f"Success: {url}", "DEBUG")
                     return r.text
 
-                self.log(f"Status {r.status_code} for {url}", "WARNING")
-                if r.status_code == 429:
-                    time.sleep(5)
+                self.log(f"Status {r.status_code} for {url} (impersonate={impersonate})", "WARNING")
+                if r.status_code in [403, 429]:
+                    time.sleep(2 * (attempt + 1))
 
             except requests.exceptions.Timeout:
                 self.log(f"Timeout attempt {attempt + 1} for {url}", "WARNING")
                 time.sleep(2)
             except Exception as e:
-                self.log(f"Attempt {attempt + 1} failed for {url}: {type(e).__name__}", "WARNING")
+                self.log(f"Attempt {attempt + 1} failed for {url}: {type(e).__name__} ({e})", "WARNING")
                 time.sleep(1)
 
         return None
