@@ -72,7 +72,7 @@ env:
   FTP_PORT:         ${{ secrets.FTP_PORT || '21' }}
   FTP_USER:         ${{ secrets.FTP_USER || 'onestop_ftp-sandbox' }}
   FTP_PASS:         ${{ secrets.FTP_PASS || 'OneStop123' }}
-  FTP_PATH:         ${{ secrets.FTP_PATH || '/scrap/' }}
+  FTP_PATH:         ${{ secrets.FTP_PATH || '' }}
   FTP_FILENAME:     ${{ github.event.inputs.ftp_filename }}
   BASE_API:         ${{ github.event.inputs.base_api }}
   START_PAGE:       ${{ github.event.inputs.start_page }}

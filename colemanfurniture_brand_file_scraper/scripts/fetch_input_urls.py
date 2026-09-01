@@ -61,11 +61,25 @@ def fetch_from_ftp(host: str, port: int, user: str, pass_: str, remote_dir: str,
             if remote_dir:
                 remote_dir = remote_dir.rstrip("/") + "/" + sub_dir
             else:
-                remote_dir = "/" + sub_dir
+                remote_dir = sub_dir  # keep relative — don't force absolute "/"
 
     if remote_dir:
-        ftp.cwd(remote_dir)
-        logger.info(f"Changed directory to remote path: {remote_dir}")
+        try:
+            ftp.cwd(remote_dir)
+            logger.info(f"Changed directory to remote path: {remote_dir}")
+        except ftplib.error_perm as e:
+            # Directory doesn't exist or no permission — list root to help diagnose
+            logger.warning(f"Cannot change to FTP directory '{remote_dir}': {e}")
+            try:
+                root_items = ftp.nlst()
+            except Exception:
+                root_items = []
+            raise FileNotFoundError(
+                f"FTP directory '{remote_dir}' does not exist or is not accessible on "
+                f"{host}:{port} (user='{user}'). "
+                f"Available items in FTP root: {root_items[:30]}. "
+                f"Please correct the --ftp-path / FTP_PATH value."
+            ) from e
         
     items = ftp.nlst()
     logger.info(f"Found {len(items)} items in remote FTP directory.")
