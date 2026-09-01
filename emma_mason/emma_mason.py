@@ -211,7 +211,7 @@ class emmamasonScraper:
         """Parse a product sitemap and return only emmamason /ip/ URLs."""
         ns  = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
         xml = self.load_xml(sitemap_url)
-        if not xml:
+        if xml is None:
             return []
 
         for path in [".//ns:url/ns:loc", ".//url/loc", ".//loc"]:
@@ -249,9 +249,11 @@ class emmamasonScraper:
     # ============================================================
 
     def extract_emmamason_data(self, soup: BeautifulSoup, url: str) -> List[Dict]:
-        """Parse JSON-LD blocks from a emmamason page. Returns one dict per data."""
-        # product_id = self.extract_product_id(url)
+        """Parse JSON-LD blocks from an emmamason page. Returns list of product dicts."""
         results: List[Dict] = []
+        category = ""
+        category_url = ""
+        product_data = None
 
         for script in soup.find_all("script", type="application/ld+json"):
             try:
@@ -260,56 +262,82 @@ class emmamasonScraper:
                     continue
                 data = json.loads(raw)
 
-                if isinstance(data, list):
+                if isinstance(data, list) and data:
                     data = data[0]
                 if not isinstance(data, dict):
                     continue
 
-               
+                schema_type = data.get("@type", "")
 
+                # Extract Breadcrumb Category
+                if schema_type == "BreadcrumbList":
+                    items = data.get("itemListElement", [])
+                    if items and isinstance(items[0], list):
+                        items = items[0]
+                    crumbs = []
+                    for it in items:
+                        if isinstance(it, dict) and "item" in it:
+                            c_name = it["item"].get("name", "")
+                            c_url = it["item"].get("@id", "")
+                            if c_name and c_name != "Emmamason Home" and not c_url.endswith(url.split("/")[-1]):
+                                crumbs.append((c_name, c_url))
+                    if crumbs:
+                        category = " > ".join([c[0] for c in crumbs])
+                        category_url = crumbs[-1][1]
 
-                selected_offer = data.get("offers", {})
-                # ---- Image ----
-                images     = data.get("image", "")
-                main_image = images[0] if isinstance(images, list) else images or ""
+                elif schema_type == "Product":
+                    product_data = data
 
-                # ---- Price ----
-                price = (
-                    selected_offer.get("price", "")
-                    or selected_offer.get("lowPrice", "")
-                    or (data.get("offers", {}).get("price", "")
-                        if isinstance(data.get("offers"), dict) else "")
-                )
-
-                # ---- Brand ----
-                brand_raw = data.get("brand", {})
-                brand     = brand_raw.get("name", "") if isinstance(brand_raw, dict) else str(brand_raw)
-
-                results.append({
-                    "competitor_product_id": "",
-                    "comp_received_name":    data.get("name", ""),
-                    "comp_received_sku":     data.get("sku", ""),
-                    "brand":                 brand,
-                    "mpn":                   data.get("mpn", ""),
-                    "category":              "",
-                    "category_url":          "",
-                    "gtin":                  data.get("gtin13", ""),
-                    "quantity":              1,
-                    "status":                "In Stock",
-                    "competitor_price":      price,
-                    "group_attr_1":          data.get("description", ""),
-                    "group_attr_2":          data.get("material", ""),
-                    "main_image":            self.normalize_image(main_image),
-                    "competitor_url":        url,
-                    "scraped_date":          self.scraped_date,
-                })
-
-                if results:
-                    return results
-
-            except (json.JSONDecodeError, AttributeError) as e:
+            except (json.JSONDecodeError, AttributeError, TypeError) as e:
                 self.log(f"JSON-LD parse error: {e}", "WARNING")
                 continue
+
+        if not product_data:
+            return results
+
+        selected_offer = product_data.get("offers", {})
+        price = ""
+        if isinstance(selected_offer, dict):
+            price = (
+                selected_offer.get("price", "")
+                or selected_offer.get("lowPrice", "")
+                or ""
+            )
+        elif isinstance(selected_offer, list) and selected_offer:
+            first_offer = selected_offer[0]
+            if isinstance(first_offer, dict):
+                price = first_offer.get("price", "") or first_offer.get("lowPrice", "")
+
+        # ---- Image ----
+        images = product_data.get("image", "")
+        main_image = images[0] if isinstance(images, list) else images or ""
+
+        # ---- Brand ----
+        brand_raw = product_data.get("brand", {})
+        brand = brand_raw.get("name", "") if isinstance(brand_raw, dict) else str(brand_raw)
+
+        sku = product_data.get("sku", "")
+        name = product_data.get("name", "")
+
+        if name:
+            results.append({
+                "competitor_product_id": sku,
+                "comp_received_name":    name,
+                "comp_received_sku":     sku,
+                "brand":                 brand,
+                "mpn":                   product_data.get("mpn", ""),
+                "category":              category,
+                "category_url":          category_url,
+                "gtin":                  product_data.get("gtin13", "") or product_data.get("gtin", ""),
+                "quantity":              1,
+                "status":                "In Stock",
+                "competitor_price":      price,
+                "group_attr_1":          product_data.get("description", ""),
+                "group_attr_2":          product_data.get("material", ""),
+                "main_image":            self.normalize_image(main_image),
+                "competitor_url":        url,
+                "scraped_date":          self.scraped_date,
+            })
 
         return results
 

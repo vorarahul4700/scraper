@@ -232,6 +232,7 @@ jobs:
           lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
           set ftp:ssl-allow no
           set cmd:fail-exit yes
+          mkdir -p $FTP_BASE_DIR
           cd $FTP_BASE_DIR
           put emmamason_products_full.csv -o $FILE
           bye
