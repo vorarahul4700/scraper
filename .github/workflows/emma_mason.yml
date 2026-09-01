@@ -4,18 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: "Base site URL"
+        description: "Base site URL or Sitemap XML URL"
         required: true
-        default: "https://www.emmamason.com"
+        default: "https://emmamason.com/sitemap.xml"
       total_sitemaps:
-        description: "Total sitemaps to process (0 = auto/10)"
-        default: "5"
+        description: "Total sitemaps to process (0 = all 50)"
+        default: "50"
       sitemaps_per_job:
         description: "Sitemaps per parallel job"
         default: "2"
       urls_per_sitemap:
         description: "Max URLs per sitemap (0 = all)"
-        default: "10"
+        default: "0"
       max_workers:
         description: "Parallel requests per job"
         default: "4"
@@ -46,8 +46,8 @@ jobs:
           URL="${{ github.event.inputs.url }}"
 
           if [ "$TOTAL" -eq 0 ]; then
-            echo "total_sitemaps=0, defaulting to 10"
-            TOTAL=10
+            echo "total_sitemaps=0, defaulting to 50"
+            TOTAL=50
           fi
 
           JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))

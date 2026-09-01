@@ -25,7 +25,17 @@ class emmamasonScraper:
     # ============================================================
 
     def __init__(self):
-        self.curr_url             = os.getenv("CURR_URL", "https://www.emmamason.com").rstrip("/")
+        raw_url                   = os.getenv("CURR_URL", "https://www.emmamason.com").strip()
+        parsed                    = urlparse(raw_url if "://" in raw_url else f"https://{raw_url}")
+        self.base_domain          = f"{parsed.scheme}://{parsed.netloc}"
+        
+        if raw_url.endswith(".xml"):
+            self.sitemap_input    = raw_url
+            self.curr_url         = self.base_domain
+        else:
+            self.curr_url         = raw_url.rstrip("/")
+            self.sitemap_input    = f"{self.curr_url}/sitemap.xml"
+
         self.api_base_url         = os.getenv("API_BASE_URL", "").rstrip("/")
         self.sitemap_offset       = int(os.getenv("SITEMAP_OFFSET", "0"))
         self.max_sitemaps         = int(os.getenv("MAX_SITEMAPS", "0"))
@@ -466,8 +476,20 @@ class emmamasonScraper:
         self.log(f"Request Delay:        {self.request_delay}s")
         self.log("=" * 60)
 
-        sitemap_index_url = f"{self.curr_url}/sitemap.xml"
-        all_sitemaps      = self.get_child_sitemaps(sitemap_index_url)
+        sitemap_index_url = self.sitemap_input
+        self.log(f"Loading sitemaps from:   {sitemap_index_url}")
+
+        all_sitemaps = []
+        if "sitemap-" in sitemap_index_url.lower():
+            # User passed a specific child sitemap directly
+            all_sitemaps = [sitemap_index_url]
+        else:
+            all_sitemaps = self.get_child_sitemaps(sitemap_index_url)
+            if not all_sitemaps:
+                # Check if it's a direct product sitemap
+                prod_urls = self.get_product_urls(sitemap_index_url)
+                if prod_urls:
+                    all_sitemaps = [sitemap_index_url]
 
         if not all_sitemaps:
             self.log("No sitemaps found. Exiting.", "ERROR")
