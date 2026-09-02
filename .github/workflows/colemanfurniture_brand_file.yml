@@ -82,46 +82,19 @@ env:
 
 jobs:
 
-  # ── PLAN ──────────────────────────────────────────────────────────────────
-  plan:
+  # ── FETCH URLS (Initial Round only) ───────────────────────────────────────
+  fetch_urls:
+    if: github.event.inputs.remaining_run_id == ''
     runs-on: ubuntu-latest
-    outputs:
-      matrix:      ${{ steps.build_matrix.outputs.matrix }}
-      domain:      ${{ steps.domain.outputs.domain }}
-      mode:        ${{ steps.build_matrix.outputs.mode }}
-      total_jobs:  ${{ steps.build_matrix.outputs.total_jobs }}
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract domain
-        id: domain
-        run: |
-          URL="${{ env.WEBSITE_URL }}"
-          DOMAIN=$(echo "$URL" | sed -E 's|https?://||;s|/.*||' | sed 's/[^a-zA-Z0-9]/_/g')
-          API_PATH=$(echo "${{ env.BASE_API }}" | sed -E 's|\?.*||' | sed -E 's|https?://[^/]+||')
-          MFG_ID=$(echo "$API_PATH" | tr -d ' ' | tr '/' '\n' | tail -n 1)
-          [ -z "$MFG_ID" ] && MFG_ID="file"
-          DOMAIN="${DOMAIN}_file_${MFG_ID}"
-          echo "domain=$DOMAIN" >> $GITHUB_OUTPUT
-
-      - name: Download merged remaining CSV (retry mode)
-        if: env.REMAINING_RUN_ID != ''
-        uses: actions/download-artifact@v4
-        with:
-          name: remaining_merged
-          run-id: ${{ env.REMAINING_RUN_ID }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: remaining_input
-
-      - name: Set up Python for Initial Round
-        if: env.REMAINING_RUN_ID == ''
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies for Initial Round
-        if: env.REMAINING_RUN_ID == ''
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f "colemanfurniture_brand_file_scraper/requirements.txt" ]; then
@@ -130,8 +103,7 @@ jobs:
             pip install scrapy pandas lxml requests beautifulsoup4
           fi
 
-      - name: Collect URLs for initial round
-        if: env.REMAINING_RUN_ID == ''
+      - name: Collect URLs
         env:
           FTP_HOST: ${{ secrets.FTP_HOST || 'ftp-sandbox.1sb.pp.ua' }}
           FTP_PORT: ${{ secrets.FTP_PORT || '21' }}
@@ -157,6 +129,54 @@ jobs:
             --end-page "${{ env.END_PAGE }}" \
             --urls "${{ env.DIRECT_URLS }}" \
             --output-file "remaining_input/remaining_merged.csv"
+
+      - name: Upload initial URLs
+        uses: actions/upload-artifact@v4
+        with:
+          name: initial_urls_round_${{ env.CURRENT_ROUND }}
+          path: remaining_input/remaining_merged.csv
+          retention-days: 1
+
+  # ── PLAN ──────────────────────────────────────────────────────────────────
+  plan:
+    needs: [fetch_urls]
+    if: always() && !cancelled() && (needs.fetch_urls.result == 'success' || needs.fetch_urls.result == 'skipped')
+    runs-on: ubuntu-latest
+    outputs:
+      matrix:      ${{ steps.build_matrix.outputs.matrix }}
+      domain:      ${{ steps.domain.outputs.domain }}
+      mode:        ${{ steps.build_matrix.outputs.mode }}
+      total_jobs:  ${{ steps.build_matrix.outputs.total_jobs }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract domain
+        id: domain
+        run: |
+          URL="${{ env.WEBSITE_URL }}"
+          DOMAIN=$(echo "$URL" | sed -E 's|https?://||;s|/.*||' | sed 's/[^a-zA-Z0-9]/_/g')
+          API_PATH=$(echo "${{ env.BASE_API }}" | sed -E 's|\?.*||' | sed -E 's|https?://[^/]+||')
+          MFG_ID=$(echo "$API_PATH" | tr -d ' ' | tr '/' '\n' | tail -n 1)
+          [ -z "$MFG_ID" ] && MFG_ID="file"
+          DOMAIN="${DOMAIN}_file_${MFG_ID}"
+          echo "domain=$DOMAIN" >> $GITHUB_OUTPUT
+
+      - name: Download initial URLs (initial mode)
+        if: env.REMAINING_RUN_ID == ''
+        uses: actions/download-artifact@v4
+        with:
+          name: initial_urls_round_${{ env.CURRENT_ROUND }}
+          path: remaining_input
+
+      - name: Download merged remaining CSV (retry mode)
+        if: env.REMAINING_RUN_ID != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: remaining_merged
+          run-id: ${{ env.REMAINING_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: remaining_input
 
       - name: Build matrix
         id: build_matrix
@@ -197,13 +217,16 @@ jobs:
           HEADER=$(head -n 1 "$REMAINING_FILE")
           tail -n +2 "$REMAINING_FILE" | grep -v '^$' | split -l "$CHUNK_SIZE" - remaining_chunks/chunk_
 
-          MATRIX="["
           IDX=0
           for CHUNK_FILE in remaining_chunks/chunk_*; do
             echo "$HEADER" > "remaining_chunks/urls_${IDX}.csv"
             cat "$CHUNK_FILE"  >> "remaining_chunks/urls_${IDX}.csv"
-            MATRIX+="{\"job_index\":$IDX,\"chunk_file\":\"remaining_chunks/urls_${IDX}.csv\"},"
             IDX=$(( IDX + 1 ))
+          done
+
+          MATRIX="["
+          for ((i=0; i<JOBS; i++)); do
+            MATRIX+="{\"job_index\":$i},"
           done
           MATRIX="${MATRIX%,}]"
           
