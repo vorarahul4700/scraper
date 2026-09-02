@@ -68,11 +68,6 @@ permissions:
 env:
   WEBSITE_URL:      "https://colemanfurniture.com"
   SOURCE_TYPE:      ${{ github.event.inputs.source_type }}
-  FTP_HOST:         ${{ secrets.FTP_HOST || 'ftp-sandbox.1sb.pp.ua' }}
-  FTP_PORT:         ${{ secrets.FTP_PORT || '21' }}
-  FTP_USER:         ${{ secrets.FTP_USER || 'onestop_ftp-sandbox' }}
-  FTP_PASS:         ${{ secrets.FTP_PASS || 'OneStop123' }}
-  FTP_PATH:         ${{ secrets.FTP_PATH || '' }}
   FTP_FILENAME:     ${{ github.event.inputs.ftp_filename }}
   BASE_API:         ${{ github.event.inputs.base_api }}
   START_PAGE:       ${{ github.event.inputs.start_page }}
@@ -135,39 +130,40 @@ jobs:
             pip install scrapy pandas lxml requests beautifulsoup4
           fi
 
+      - name: Collect URLs for initial round
+        if: env.REMAINING_RUN_ID == ''
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST || 'ftp-sandbox.1sb.pp.ua' }}
+          FTP_PORT: ${{ secrets.FTP_PORT || '21' }}
+          FTP_USER: ${{ secrets.FTP_USER || 'onestop_ftp-sandbox' }}
+          FTP_PASS: ${{ secrets.FTP_PASS || 'OneStop123' }}
+          FTP_PATH: ${{ secrets.FTP_PATH || '' }}
+        run: |
+          echo "=== INITIAL MODE (round ${{ env.CURRENT_ROUND }}) ==="
+          echo "Collecting URLs for Source Type: ${{ env.SOURCE_TYPE }}"
+          mkdir -p remaining_input
+
+          python colemanfurniture_brand_file_scraper/scripts/fetch_input_urls.py \
+            --source-type "${{ env.SOURCE_TYPE }}" \
+            --ftp-host "$FTP_HOST" \
+            --ftp-port "$FTP_PORT" \
+            --ftp-user "$FTP_USER" \
+            --ftp-pass "$FTP_PASS" \
+            --ftp-path "$FTP_PATH" \
+            --ftp-filename "${{ env.FTP_FILENAME }}" \
+            --sitemap-url "${{ env.SITEMAP_URL }}" \
+            --base-api "${{ env.BASE_API }}" \
+            --start-page "${{ env.START_PAGE }}" \
+            --end-page "${{ env.END_PAGE }}" \
+            --urls "${{ env.DIRECT_URLS }}" \
+            --output-file "remaining_input/remaining_merged.csv"
+
       - name: Build matrix
         id: build_matrix
         run: |
-          URL="${{ env.WEBSITE_URL }}"
-          DOMAIN="${{ steps.domain.outputs.domain }}"
           PER_JOB="${{ env.URLS_PER_JOB }}"
           ROUND="${{ env.CURRENT_ROUND }}"
-
-          if [ -n "${{ env.REMAINING_RUN_ID }}" ] && [ -f "remaining_input/remaining_merged.csv" ]; then
-            echo "=== RETRY MODE (round $ROUND) ==="
-            REMAINING_FILE="remaining_input/remaining_merged.csv"
-          else
-            echo "=== INITIAL MODE (round $ROUND) ==="
-            echo "Collecting URLs for Source Type: ${{ env.SOURCE_TYPE }}"
-            mkdir -p remaining_input
-
-            python colemanfurniture_brand_file_scraper/scripts/fetch_input_urls.py \
-              --source-type "${{ env.SOURCE_TYPE }}" \
-              --ftp-host "${{ env.FTP_HOST }}" \
-              --ftp-port "${{ env.FTP_PORT }}" \
-              --ftp-user "${{ env.FTP_USER }}" \
-              --ftp-pass "${{ env.FTP_PASS }}" \
-              --ftp-path "${{ env.FTP_PATH }}" \
-              --ftp-filename "${{ env.FTP_FILENAME }}" \
-              --sitemap-url "${{ env.SITEMAP_URL }}" \
-              --base-api "${{ env.BASE_API }}" \
-              --start-page "${{ env.START_PAGE }}" \
-              --end-page "${{ env.END_PAGE }}" \
-              --urls "${{ env.DIRECT_URLS }}" \
-              --output-file "remaining_input/remaining_merged.csv"
-            
-            REMAINING_FILE="remaining_input/remaining_merged.csv"
-          fi
+          REMAINING_FILE="remaining_input/remaining_merged.csv"
 
           if [ ! -f "$REMAINING_FILE" ]; then
             echo "Error: Remaining file $REMAINING_FILE was not generated"
@@ -206,7 +202,7 @@ jobs:
           for CHUNK_FILE in remaining_chunks/chunk_*; do
             echo "$HEADER" > "remaining_chunks/urls_${IDX}.csv"
             cat "$CHUNK_FILE"  >> "remaining_chunks/urls_${IDX}.csv"
-            MATRIX+="{\"job_index\":$IDX,\"domain\":\"$DOMAIN\",\"chunk_file\":\"remaining_chunks/urls_${IDX}.csv\"},"
+            MATRIX+="{\"job_index\":$IDX,\"chunk_file\":\"remaining_chunks/urls_${IDX}.csv\"},"
             IDX=$(( IDX + 1 ))
           done
           MATRIX="${MATRIX%,}]"
@@ -265,7 +261,7 @@ jobs:
           MAX_WORKERS: ${{ env.MAX_WORKERS }}
         run: |
           JOB_IDX="${{ matrix.job_index }}"
-          DOMAIN="${{ matrix.domain }}"
+          DOMAIN="${{ needs.plan.outputs.domain }}"
           ROUND="${{ env.CURRENT_ROUND }}"
           TIMESTAMP="${GITHUB_RUN_ID}"
           
@@ -313,7 +309,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: result_job${{ matrix.job_index }}_r${{ env.CURRENT_ROUND }}
-          path: output/result_${{ matrix.domain }}_job${{ matrix.job_index }}_r${{ env.CURRENT_ROUND }}.csv
+          path: output/result_${{ needs.plan.outputs.domain }}_job${{ matrix.job_index }}_r${{ env.CURRENT_ROUND }}.csv
           retention-days: 3
 
       - name: Upload remaining URLs artifact
@@ -452,10 +448,11 @@ jobs:
       - name: Upload to FTP server
         if: success()
         env:
-          FTP_HOST:     ${{ env.FTP_HOST }}
-          FTP_USER:     ${{ env.FTP_USER }}
-          FTP_PASS:     ${{ env.FTP_PASS }}
-          FTP_BASE_DIR: ${{ env.FTP_PATH }}
+          FTP_HOST:     ${{ secrets.FTP_HOST || 'ftp-sandbox.1sb.pp.ua' }}
+          FTP_PORT:     ${{ secrets.FTP_PORT || '21' }}
+          FTP_USER:     ${{ secrets.FTP_USER || 'onestop_ftp-sandbox' }}
+          FTP_PASS:     ${{ secrets.FTP_PASS || 'OneStop123' }}
+          FTP_BASE_DIR: ${{ secrets.FTP_PATH || '' }}
           FILE:         ${{ steps.meta.outputs.name }}
         run: |
           if [ -z "$FTP_HOST" ]; then exit 0; fi
