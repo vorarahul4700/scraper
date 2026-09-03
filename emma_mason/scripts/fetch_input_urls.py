@@ -21,7 +21,7 @@ formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 def save_urls_to_csv(urls: List[str], output_file: str) -> int:
     """Writes a list of URLs to the standard remaining_merged.csv structure."""
@@ -177,7 +177,6 @@ def fetch_from_sitemap(sitemap_url: str) -> List[str]:
                 logger.warning(f"Sitemap HTTP status {r.status_code} for {url}")
                 return None
             text = r.text
-            # Emma Mason injects script tags in sitemaps; strip them
             text = re.sub(r'<script[^>]*/>', '', text)
             text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL)
             if "<?xml" not in text[:100]:
@@ -193,7 +192,6 @@ def fetch_from_sitemap(sitemap_url: str) -> List[str]:
 
     ns = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
     
-    # Check if sitemap index
     child_sitemaps = []
     for path in [".//ns:sitemap/ns:loc", ".//sitemap/loc", ".//loc"]:
         elements = root.findall(path, ns) if "ns:" in path else root.findall(path)
@@ -224,7 +222,6 @@ def fetch_from_sitemap(sitemap_url: str) -> List[str]:
                 product_urls.extend(urls)
                 break
 
-    # Filter product URLs (for emma_mason, product URLs typically don't have multiple slashes or are product pages)
     logger.info(f"Extracted total {len(product_urls)} raw URLs from sitemap")
     return product_urls
 

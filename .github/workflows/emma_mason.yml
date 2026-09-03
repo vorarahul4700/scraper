@@ -103,7 +103,7 @@ jobs:
           echo "Collecting URLs for Source Type: ${{ env.SOURCE_TYPE }}"
           mkdir -p remaining_input
 
-          python emma_mason/fetch_input_urls.py \
+          python emma_mason/scripts/fetch_input_urls.py \
             --source-type "${{ env.SOURCE_TYPE }}" \
             --ftp-host "$FTP_HOST" \
             --ftp-port "$FTP_PORT" \
@@ -275,13 +275,11 @@ jobs:
           echo "=== Scrape job $JOB_IDX | round=$ROUND ==="
           echo "Loading URLs from: $URLS_FILE"
 
-          python emma_mason/emma_mason.py \
+          python emma_mason/scripts/run.py \
             --website-url "${{ env.WEBSITE_URL }}" \
             --job-id "$JOB_ID" \
             --output-dir output \
             --urls-file "$URLS_FILE" \
-            --max-workers "${{ env.MAX_WORKERS }}" \
-            --request-delay "${{ env.REQUEST_DELAY }}" \
             --verbose
 
           OUTPUT_CSV=$(ls output/output_*_${JOB_ID}_${TIMESTAMP}.csv 2>/dev/null || echo "")
