@@ -271,11 +271,14 @@ jobs:
           JOB_ID="job${JOB_IDX}_r${ROUND}"
           CHUNK_BASENAME="urls_${JOB_IDX}.csv"
           URLS_FILE="retry_input/${CHUNK_BASENAME}"
+          if [ ! -f "$URLS_FILE" ]; then
+            URLS_FILE=$(find retry_input -name "$CHUNK_BASENAME" -type f | head -n 1)
+          fi
           
           echo "=== Scrape job $JOB_IDX | round=$ROUND ==="
           echo "Loading URLs from: $URLS_FILE"
 
-          python emma_mason/scripts/run.py \
+          python -u emma_mason/scripts/run.py \
             --website-url "${{ env.WEBSITE_URL }}" \
             --job-id "$JOB_ID" \
             --output-dir output \

@@ -6,12 +6,18 @@ import csv
 import json
 from pathlib import Path
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 logger = logging.getLogger("app")
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-handler.setFormatter(formatter)
-logger.addHandler(handler)
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 

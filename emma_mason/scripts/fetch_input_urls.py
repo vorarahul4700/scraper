@@ -14,12 +14,13 @@ from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 from ftplib import FTP, parse227
 
+# Real-time console logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 logger = logging.getLogger("fetch_input_urls")
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-handler.setFormatter(formatter)
-logger.addHandler(handler)
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -74,37 +75,37 @@ def fetch_from_ftp(host: str, port: int, user: str, pass_: str, remote_dir: str,
     target_clean = (target_filename or "").replace("\\", "/").strip("/")
     filename = target_clean.split("/")[-1] if target_clean else ""
 
-    candidates = []
-    if target_clean:
-        candidates.extend([
-            target_clean,
-            filename,
-            f"scrap/{filename}",
-            f"scrap/input_urls/{filename}",
-            f"scrap/{target_clean}",
-            f"input_urls/{filename}",
-            f"input_urls/{target_clean}"
-        ])
+    if not target_clean and not filename:
+        raise ValueError("No FTP filename specified! Please pass --ftp-filename (e.g. input_urls/sample.csv or scrap/emma-mason.csv)")
+
+    candidates = [
+        target_clean,
+        f"scrap/{target_clean}",
+        f"scrap/input_urls/{filename}",
+        f"input_urls/{filename}",
+        f"scrap/{filename}",
+        filename
+    ]
     if remote_dir:
         remote_clean = remote_dir.replace("\\", "/").strip("/")
-        if filename:
-            candidates.insert(0, f"{remote_clean}/{filename}")
-        candidates.insert(1, remote_clean)
+        candidates.insert(0, f"{remote_clean}/{target_clean}")
+        candidates.insert(1, f"{remote_clean}/{filename}")
 
     found_file = None
     for cand in candidates:
         if not cand:
             continue
         try:
-            ftp.size(cand)
-            found_file = cand
-            logger.info(f"Found file on FTP via direct path: {cand}")
-            break
+            sz = ftp.size(cand)
+            if sz is not None and sz > 0:
+                found_file = cand
+                logger.info(f"Found file on FTP via path: {cand} ({sz} bytes)")
+                break
         except Exception:
             pass
 
     if not found_file and filename:
-        for folder in ["", "scrap", "scrap/input_urls", "emma-mason", "input_urls"]:
+        for folder in ["scrap/input_urls", "scrap", "emma-mason", "input_urls", ""]:
             try:
                 items = ftp.nlst(folder)
                 for it in items:
@@ -119,26 +120,9 @@ def fetch_from_ftp(host: str, port: int, user: str, pass_: str, remote_dir: str,
                 pass
 
     if not found_file:
-        # Fallback: scan root and scrap for any .csv file
-        for folder in ["scrap", ""]:
-            try:
-                items = ftp.nlst(folder)
-                csv_files = [it for it in items if it.lower().endswith(".csv")]
-                if csv_files:
-                    found_file = csv_files[0]
-                    logger.info(f"Auto-selected CSV file from '{folder}': {found_file}")
-                    break
-            except Exception:
-                pass
-
-    if not found_file:
-        try:
-            root_items = ftp.nlst()
-        except Exception:
-            root_items = []
         raise FileNotFoundError(
-            f"Specified file '{target_filename}' not found on FTP server {host}:{port}. "
-            f"Available items in root: {root_items[:20]}"
+            f"Specified file '{target_filename}' could not be found on FTP server {host}:{port}. "
+            f"Checked paths: {candidates}"
         )
 
     logger.info(f"Downloading '{found_file}' from FTP...")
@@ -212,7 +196,7 @@ def fetch_from_sitemap(sitemap_url: str) -> List[str]:
 
     def load_sitemap_xml(url: str):
         try:
-            r = requests.get(url, headers=headers, impersonate="chrome124", timeout=30)
+            r = requests.get(url, headers=headers, impersonate="chrome124", verify=False, timeout=30)
             if r.status_code != 200:
                 logger.warning(f"Sitemap HTTP status {r.status_code} for {url}")
                 return None
@@ -296,7 +280,7 @@ def main():
     parser.add_argument("--ftp-user", default="onestop_ftp-sandbox", help="FTP Username")
     parser.add_argument("--ftp-pass", default="OneStop123", help="FTP Password")
     parser.add_argument("--ftp-path", default="", help="FTP directory path")
-    parser.add_argument("--ftp-filename", default="", help="Specific CSV filename on FTP server (e.g. input_urls/emma-mason.csv or scrap/emma-mason.csv)")
+    parser.add_argument("--ftp-filename", default="", help="Specific CSV filename on FTP server (e.g. input_urls/sample.csv or scrap/emma-mason.csv)")
 
     # Sitemap args
     parser.add_argument("--sitemap-url", default="https://emmamason.com/sitemap.xml", help="Sitemap XML URL")

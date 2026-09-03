@@ -27,9 +27,14 @@ except ImportError:
 
 class ProductFetcher:
     def __init__(self, **kwargs):
-        self.verbose = kwargs.get('verbose', False)
+        self.verbose = kwargs.get('verbose', True)
         self.logger = logging.getLogger('product')
-        self.logger.setLevel(logging.INFO if self.verbose else logging.WARNING)
+        self.logger.setLevel(logging.INFO)
+        if not self.logger.handlers:
+            h = logging.StreamHandler(sys.stdout)
+            h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+            self.logger.addHandler(h)
+        self.logger.propagate = True
         
         self.is_ashley = kwargs.get('is_ashley', False)
         self.ashley_urls = kwargs.get('ashley_urls', [])
@@ -228,14 +233,16 @@ class ProductFetcher:
         for attempt in range(3):
             impersonate = impersonates[attempt % len(impersonates)]
             try:
-                r = session.get(url, timeout=20, impersonate=impersonate, verify=True)
+                r = session.get(url, timeout=25, impersonate=impersonate, verify=False)
                 if r.status_code == 200:
                     return 200, r.text
                 if r.status_code in [404, 301, 302, 410]:
                     return r.status_code, ""
+                self.logger.warning(f"⚠️ [Attempt {attempt+1}/3] HTTP {r.status_code} for {url} ({impersonate})")
                 if r.status_code in [403, 429]:
-                    time.sleep(2 * (attempt + 1))
+                    time.sleep(1.5 * (attempt + 1))
             except Exception as e:
+                self.logger.warning(f"⚠️ [Attempt {attempt+1}/3] Request error for {url}: {type(e).__name__} - {e}")
                 time.sleep(1)
         return 0, ""
 
@@ -462,16 +469,25 @@ class ProductFetcher:
             writer = csv.writer(out_f)
             writer.writerow(self.csv_header)
 
-            session = requests.Session()
-            session.headers.update({
-                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'accept-language': 'en-US,en;q=0.9',
-                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-            })
+            _thread_local = threading.local()
+
+            def get_thread_session():
+                if not hasattr(_thread_local, 'session'):
+                    s = requests.Session()
+                    s.headers.update({
+                        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                        'accept-language': 'en-US,en;q=0.9',
+                    })
+                    _thread_local.session = s
+                return _thread_local.session
+
+            def worker_task(url_to_fetch):
+                s = get_thread_session()
+                return self.process_url(s, url_to_fetch, writer)
 
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 futures = [
-                    executor.submit(self.process_url, session, u, writer)
+                    executor.submit(worker_task, u)
                     for u in urls_to_process
                 ]
                 for f in as_completed(futures):
@@ -529,20 +545,20 @@ class ProductFetcher:
                     })
 
         self.logger.info("=" * 70)
-        self.logger.info(f"🏁 FINAL SCRAPING REPORT - Job: {self.job_id}")
-        self.logger.info(f"   📊 Summary:")
+        self.logger.info(f"[REPORT] FINAL SCRAPING REPORT - Job: {self.job_id}")
+        self.logger.info(f"   Summary:")
         self.logger.info(f"      - Total URLs found: {self.total_urls_found}")
         self.logger.info(f"      - URLs processed: {self.processed_count}")
-        self.logger.info(f"      - ✅ Successful: {self.processed_count - self.failed_count}")
-        self.logger.info(f"      - ⏭️ Skipped (duplicates): {self.skipped_count}")
-        self.logger.info(f"      - ❌ Failed: {self.failed_count}")
+        self.logger.info(f"      - [SUCCESS] Scraped: {self.processed_count - self.failed_count}")
+        self.logger.info(f"      - [SKIP] Skipped: {self.skipped_count}")
+        self.logger.info(f"      - [FAIL] Failed: {self.failed_count}")
         if remaining_file:
-            self.logger.info(f"      - 🔁 Remaining file: {remaining_file}")
+            self.logger.info(f"      - Remaining file: {remaining_file}")
             print(f"REMAINING_FILE={remaining_file}")
         if unscraped_file:
-            self.logger.info(f"      - 📄 Unscraped file: {unscraped_file}")
+            self.logger.info(f"      - Unscraped file: {unscraped_file}")
             print(f"UNSCRAPED_FILE={unscraped_file}")
-        self.logger.info(f"   📈 Performance:")
+        self.logger.info(f"   Performance:")
         self.logger.info(f"      - Success rate: {success_rate:.1f}%")
         self.logger.info(f"      - Total time: {elapsed:.1f}s")
         self.logger.info("=" * 70)
