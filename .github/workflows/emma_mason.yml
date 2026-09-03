@@ -13,9 +13,9 @@ on:
           - "Sitemap"
           - "Direct URLs"
       ftp_filename:
-        description: "CSV path on FTP server (e.g., input_urls/emma-mason.csv or emma-mason.csv)"
+        description: "CSV path on FTP server (e.g., scrap/emma-mason.csv or input_urls/emma-mason.csv or emma-mason.csv)"
         required: false
-        default: "input_urls/emma-mason.csv"
+        default: "scrap/emma-mason.csv"
         type: string
       sitemap_url:
         description: "Sitemap URL (for Sitemap mode)"

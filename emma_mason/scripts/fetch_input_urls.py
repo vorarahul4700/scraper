@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import List
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
+from ftplib import FTP, parse227
 
-# Set up logger
 logger = logging.getLogger("fetch_input_urls")
 logger.setLevel(logging.INFO)
 handler = logging.StreamHandler()
@@ -22,6 +22,23 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+
+class CustomFTP(FTP):
+    """Custom FTP subclass supporting both PASV and EPSV mode response formats."""
+    def makepasv(self):
+        try:
+            val = self.sendcmd('PASV')
+            if val.startswith('227'):
+                return parse227(val)
+        except Exception:
+            pass
+        val = self.sendcmd('EPSV')
+        m = re.search(r'\(\|\|\|(\d+)\|\)', val)
+        if m:
+            return self.host, int(m.group(1))
+        raise Exception(f'Cannot parse PASV/EPSV: {val}')
+
 
 def save_urls_to_csv(urls: List[str], output_file: str) -> int:
     """Writes a list of URLs to the standard remaining_merged.csv structure."""
@@ -47,76 +64,98 @@ def save_urls_to_csv(urls: List[str], output_file: str) -> int:
     logger.info(f"Successfully saved {len(clean_urls)} unique URLs to {output_file}")
     return len(clean_urls)
 
+
 def fetch_from_ftp(host: str, port: int, user: str, pass_: str, remote_dir: str, target_filename: str = "") -> List[str]:
     logger.info(f"Connecting to FTP {host}:{port} as user '{user}'...")
-    ftp = ftplib.FTP()
+    ftp = CustomFTP()
     ftp.connect(host, port, timeout=30)
     ftp.login(user, pass_)
-    
-    # Support relative sub-paths in target_filename (e.g., "input_urls/emma-mason.csv")
-    if target_filename:
-        target_filename = target_filename.strip()
-        if "/" in target_filename or "\\" in target_filename:
-            parts = target_filename.replace("\\", "/").lstrip("/").split("/")
-            sub_dir = "/".join(parts[:-1])
-            target_filename = parts[-1]
-            if remote_dir:
-                remote_dir = remote_dir.rstrip("/") + "/" + sub_dir
-            else:
-                remote_dir = sub_dir
 
+    target_clean = (target_filename or "").replace("\\", "/").strip("/")
+    filename = target_clean.split("/")[-1] if target_clean else ""
+
+    candidates = []
+    if target_clean:
+        candidates.extend([
+            target_clean,
+            filename,
+            f"scrap/{filename}",
+            f"scrap/input_urls/{filename}",
+            f"scrap/{target_clean}",
+            f"input_urls/{filename}",
+            f"input_urls/{target_clean}"
+        ])
     if remote_dir:
+        remote_clean = remote_dir.replace("\\", "/").strip("/")
+        if filename:
+            candidates.insert(0, f"{remote_clean}/{filename}")
+        candidates.insert(1, remote_clean)
+
+    found_file = None
+    for cand in candidates:
+        if not cand:
+            continue
         try:
-            ftp.cwd(remote_dir)
-            logger.info(f"Changed directory to remote path: {remote_dir}")
-        except ftplib.error_perm as e:
-            logger.warning(f"Cannot change to FTP directory '{remote_dir}': {e}")
+            ftp.size(cand)
+            found_file = cand
+            logger.info(f"Found file on FTP via direct path: {cand}")
+            break
+        except Exception:
+            pass
+
+    if not found_file and filename:
+        for folder in ["", "scrap", "scrap/input_urls", "emma-mason", "input_urls"]:
             try:
-                root_items = ftp.nlst()
+                items = ftp.nlst(folder)
+                for it in items:
+                    it_base = it.split("/")[-1]
+                    if it_base.lower() == filename.lower():
+                        found_file = it
+                        logger.info(f"Found file on FTP by scanning '{folder}': {it}")
+                        break
+                if found_file:
+                    break
             except Exception:
-                root_items = []
-            raise FileNotFoundError(
-                f"FTP directory '{remote_dir}' does not exist or is not accessible on "
-                f"{host}:{port} (user='{user}'). "
-                f"Available items in FTP root: {root_items[:30]}. "
-                f"Please correct the --ftp-path / FTP_PATH value."
-            ) from e
-        
-    items = ftp.nlst()
-    logger.info(f"Found {len(items)} items in remote FTP directory.")
-    
-    target_file = ""
-    if target_filename and target_filename in items:
-        target_file = target_filename
-    elif target_filename:
-        for it in items:
-            if it.lower() == target_filename.lower():
-                target_file = it
-                break
-        if not target_file:
-            raise FileNotFoundError(f"Specified target file '{target_filename}' not found in FTP folder '{remote_dir}'. Available: {items[:20]}...")
-    else:
-        csv_files = [it for it in items if it.lower().endswith(".csv")]
-        if not csv_files:
-            raise FileNotFoundError(f"No .csv files found in FTP directory '{remote_dir}'. Available items: {items[:20]}...")
-        target_file = csv_files[0]
-        logger.info(f"No filename specified. Auto-selected CSV file from FTP: {target_file}")
-        
-    logger.info(f"Downloading '{target_file}' from FTP...")
+                pass
+
+    if not found_file:
+        # Fallback: scan root and scrap for any .csv file
+        for folder in ["scrap", ""]:
+            try:
+                items = ftp.nlst(folder)
+                csv_files = [it for it in items if it.lower().endswith(".csv")]
+                if csv_files:
+                    found_file = csv_files[0]
+                    logger.info(f"Auto-selected CSV file from '{folder}': {found_file}")
+                    break
+            except Exception:
+                pass
+
+    if not found_file:
+        try:
+            root_items = ftp.nlst()
+        except Exception:
+            root_items = []
+        raise FileNotFoundError(
+            f"Specified file '{target_filename}' not found on FTP server {host}:{port}. "
+            f"Available items in root: {root_items[:20]}"
+        )
+
+    logger.info(f"Downloading '{found_file}' from FTP...")
     urls = []
     tmp_fd, tmp_name = tempfile.mkstemp(suffix=".csv")
     try:
         with os.fdopen(tmp_fd, "wb") as tmp:
-            ftp.retrbinary(f"RETR {target_file}", tmp.write)
+            ftp.retrbinary(f"RETR {found_file}", tmp.write)
         ftp.quit()
         logger.info("FTP download complete. Parsing CSV file...")
-        
+
         with open(tmp_name, "r", encoding="utf-8-sig", errors="ignore") as f:
             reader = csv.reader(f)
             header = None
             url_idx = -1
             priority_cols = ["item_url", "ref product url", "product url", "product_url", "url", "link", "product_link", "target_url", "item url"]
-            
+
             for row in reader:
                 if not row:
                     continue
@@ -129,13 +168,13 @@ def fetch_from_ftp(host: str, port: int, user: str, pass_: str, remote_dir: str,
                                 break
                         if url_idx != -1:
                             break
-                            
+
                     if url_idx == -1:
                         for idx, col in enumerate(header):
                             if "url" in col or "link" in col:
                                 url_idx = idx
                                 break
-                                
+
                     if url_idx != -1:
                         logger.info(f"Selected column index {url_idx} ('{header[url_idx]}') for product URLs")
                     else:
@@ -143,7 +182,7 @@ def fetch_from_ftp(host: str, port: int, user: str, pass_: str, remote_dir: str,
                             urls.append(row[0].strip())
                             url_idx = 0
                     continue
-                
+
                 if url_idx != -1 and len(row) > url_idx:
                     u = row[url_idx].strip()
                     if u.startswith("http"):
@@ -157,22 +196,23 @@ def fetch_from_ftp(host: str, port: int, user: str, pass_: str, remote_dir: str,
     finally:
         if os.path.exists(tmp_name):
             os.remove(tmp_name)
-            
-    logger.info(f"Extracted {len(urls)} URLs from FTP file '{target_file}'")
+
+    logger.info(f"Extracted {len(urls)} URLs from FTP file '{found_file}'")
     return urls
 
+
 def fetch_from_sitemap(sitemap_url: str) -> List[str]:
-    import requests
+    from curl_cffi import requests
     logger.info(f"Fetching sitemap from: {sitemap_url}")
-    
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     }
-    
+
     def load_sitemap_xml(url: str):
         try:
-            r = requests.get(url, headers=headers, timeout=30)
+            r = requests.get(url, headers=headers, impersonate="chrome124", timeout=30)
             if r.status_code != 200:
                 logger.warning(f"Sitemap HTTP status {r.status_code} for {url}")
                 return None
@@ -191,7 +231,7 @@ def fetch_from_sitemap(sitemap_url: str) -> List[str]:
         return []
 
     ns = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-    
+
     child_sitemaps = []
     for path in [".//ns:sitemap/ns:loc", ".//sitemap/loc", ".//loc"]:
         elements = root.findall(path, ns) if "ns:" in path else root.findall(path)
@@ -225,6 +265,7 @@ def fetch_from_sitemap(sitemap_url: str) -> List[str]:
     logger.info(f"Extracted total {len(product_urls)} raw URLs from sitemap")
     return product_urls
 
+
 def fetch_from_direct(urls_str: str, urls_file: str = "") -> List[str]:
     urls = []
     if urls_file and os.path.exists(urls_file):
@@ -242,35 +283,36 @@ def fetch_from_direct(urls_str: str, urls_file: str = "") -> List[str]:
                 urls.append(u)
     return urls
 
+
 def main():
     parser = argparse.ArgumentParser(description="Fetch product URLs for Emma Mason from FTP, Sitemap, or Direct inputs")
     parser.add_argument("--source-type", default="ftp", type=str.lower,
                         choices=["ftp", "sitemap", "direct", "urls", "direct urls"],
                         help="Input source type for URL collection (ftp, sitemap, direct)")
-    
+
     # FTP args
     parser.add_argument("--ftp-host", default="ftp-sandbox.1sb.pp.ua", help="FTP Hostname")
     parser.add_argument("--ftp-port", type=int, default=21, help="FTP Port")
     parser.add_argument("--ftp-user", default="onestop_ftp-sandbox", help="FTP Username")
     parser.add_argument("--ftp-pass", default="OneStop123", help="FTP Password")
     parser.add_argument("--ftp-path", default="", help="FTP directory path")
-    parser.add_argument("--ftp-filename", default="", help="Specific CSV filename on FTP server (e.g. input_urls/emma-mason.csv)")
-    
+    parser.add_argument("--ftp-filename", default="", help="Specific CSV filename on FTP server (e.g. input_urls/emma-mason.csv or scrap/emma-mason.csv)")
+
     # Sitemap args
     parser.add_argument("--sitemap-url", default="https://emmamason.com/sitemap.xml", help="Sitemap XML URL")
-    
+
     # Direct args
     parser.add_argument("--urls", default="", help="Comma or newline separated URLs")
     parser.add_argument("--urls-file", default="", help="Path to file containing URLs")
-    
+
     # Output file
     parser.add_argument("--output-file", default="remaining_input/remaining_merged.csv", help="Target output CSV file path")
-    
+
     args = parser.parse_args()
-    
+
     source = args.source_type.lower()
     logger.info(f"=== Starting URL collection mode: {source.upper()} ===")
-    
+
     urls = []
     if source == "ftp":
         urls = fetch_from_ftp(
@@ -287,13 +329,14 @@ def main():
         urls = fetch_from_direct(urls_str=args.urls, urls_file=args.urls_file)
     else:
         raise ValueError(f"Unsupported source_type: {args.source_type}")
-        
+
     if not urls:
         logger.error(f"No URLs collected using source_type '{source}'!")
         sys.exit(1)
-        
+
     count = save_urls_to_csv(urls, args.output_file)
     logger.info(f"Finished processing. Total {count} URLs written to {args.output_file}")
+
 
 if __name__ == "__main__":
     main()
