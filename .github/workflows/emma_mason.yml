@@ -1,71 +1,234 @@
-name: Parallel Sitemap Scraper - emmamason
+name: Emma Mason Parallel Scraper (FTP/Sitemap/Direct) - File Support
 
 on:
   workflow_dispatch:
     inputs:
-      url:
-        description: "Base site URL or Sitemap XML URL"
+      source_type:
+        description: "Input source type for URL collection (FTP, Sitemap, Direct URLs)"
         required: true
+        default: "FTP"
+        type: choice
+        options:
+          - "FTP"
+          - "Sitemap"
+          - "Direct URLs"
+      ftp_filename:
+        description: "CSV path on FTP server (e.g., input_urls/emma-mason.csv or emma-mason.csv)"
+        required: false
+        default: "input_urls/emma-mason.csv"
+        type: string
+      sitemap_url:
+        description: "Sitemap URL (for Sitemap mode)"
         default: "https://emmamason.com/sitemap.xml"
-      total_sitemaps:
-        description: "Total sitemaps to process (0 = all 50)"
-        default: "50"
-      sitemaps_per_job:
-        description: "Sitemaps per parallel job"
-        default: "2"
-      urls_per_sitemap:
-        description: "Max URLs per sitemap (0 = all)"
-        default: "0"
+        type: string
+      direct_urls:
+        description: "Direct URLs list (comma or newline separated for Direct URLs mode)"
+        default: ""
+        type: string
+      urls_per_job:
+        description: "Number of URLs to scrape per parallel job"
+        default: "500"
+        type: number
       max_workers:
-        description: "Parallel requests per job"
-        default: "4"
+        description: "Max concurrent workers per job"
+        default: "8"
+        type: number
       request_delay:
         description: "Delay between requests (seconds)"
-        default: "0.5"
+        default: "0.2"
+        type: string
+      max_rounds:
+        description: "Max recursion rounds (workflow re-triggers)"
+        default: "50"
+        type: number
+      # ── Internal inputs (set automatically on re-trigger) ──
+      current_round:
+        description: "[Internal] Current recursion round"
+        default: "1"
+        type: number
+      remaining_run_id:
+        description: "[Internal] Run ID that produced the merged remaining CSV"
+        default: ""
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+
+env:
+  WEBSITE_URL:      "https://emmamason.com"
+  SOURCE_TYPE:      ${{ github.event.inputs.source_type }}
+  FTP_FILENAME:     ${{ github.event.inputs.ftp_filename }}
+  SITEMAP_URL:      ${{ github.event.inputs.sitemap_url }}
+  DIRECT_URLS:      ${{ github.event.inputs.direct_urls }}
+  URLS_PER_JOB:     ${{ github.event.inputs.urls_per_job }}
+  MAX_WORKERS:      ${{ github.event.inputs.max_workers }}
+  REQUEST_DELAY:    ${{ github.event.inputs.request_delay }}
+  MAX_ROUNDS:       ${{ github.event.inputs.max_rounds }}
+  CURRENT_ROUND:    ${{ github.event.inputs.current_round }}
+  REMAINING_RUN_ID: ${{ github.event.inputs.remaining_run_id }}
 
 jobs:
-  plan:
+
+  # ── FETCH URLS (Initial Round only) ───────────────────────────────────────
+  fetch_urls:
+    if: github.event.inputs.remaining_run_id == ''
     runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.matrix.outputs.matrix }}
-      site_name: ${{ steps.get_site_name.outputs.site_name }}
     steps:
-      - name: Extract site name from URL
-        id: get_site_name
-        run: |
-          URL="${{ github.event.inputs.url }}"
-          SITE_NAME=$(echo "$URL" | sed -E 's|https?://||;s|www\.||;s|\.[a-zA-Z]+(/.*)?$||;s|/.*||')
-          echo "site_name=$SITE_NAME" >> $GITHUB_OUTPUT
-          echo "Site name: $SITE_NAME"
+      - uses: actions/checkout@v4
 
-      - name: Build job matrix
-        id: matrix
-        run: |
-          TOTAL=${{ github.event.inputs.total_sitemaps }}
-          PER_JOB=${{ github.event.inputs.sitemaps_per_job }}
-          URL="${{ github.event.inputs.url }}"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-          if [ "$TOTAL" -eq 0 ]; then
-            echo "total_sitemaps=0, defaulting to 50"
-            TOTAL=50
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f "emma_mason/requirements.txt" ]; then
+            pip install -r emma_mason/requirements.txt
+          else
+            pip install curl_cffi beautifulsoup4 requests lxml urllib3 pandas
           fi
 
-          JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))
+      - name: Collect URLs
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST || 'ftp-sandbox.1sb.pp.ua' }}
+          FTP_PORT: ${{ secrets.FTP_PORT || '21' }}
+          FTP_USER: ${{ secrets.FTP_USER || 'onestop_ftp-sandbox' }}
+          FTP_PASS: ${{ secrets.FTP_PASS || 'OneStop123' }}
+          FTP_PATH: ${{ secrets.FTP_PATH || '' }}
+        run: |
+          echo "=== INITIAL MODE (round ${{ env.CURRENT_ROUND }}) ==="
+          echo "Collecting URLs for Source Type: ${{ env.SOURCE_TYPE }}"
+          mkdir -p remaining_input
+
+          python emma_mason/fetch_input_urls.py \
+            --source-type "${{ env.SOURCE_TYPE }}" \
+            --ftp-host "$FTP_HOST" \
+            --ftp-port "$FTP_PORT" \
+            --ftp-user "$FTP_USER" \
+            --ftp-pass "$FTP_PASS" \
+            --ftp-path "$FTP_PATH" \
+            --ftp-filename "${{ env.FTP_FILENAME }}" \
+            --sitemap-url "${{ env.SITEMAP_URL }}" \
+            --urls "${{ env.DIRECT_URLS }}" \
+            --output-file "remaining_input/remaining_merged.csv"
+
+      - name: Upload initial URLs
+        uses: actions/upload-artifact@v4
+        with:
+          name: initial_urls_round_${{ env.CURRENT_ROUND }}
+          path: remaining_input/remaining_merged.csv
+          retention-days: 1
+
+  # ── PLAN ──────────────────────────────────────────────────────────────────
+  plan:
+    needs: [fetch_urls]
+    if: always() && !cancelled() && (needs.fetch_urls.result == 'success' || needs.fetch_urls.result == 'skipped')
+    runs-on: ubuntu-latest
+    outputs:
+      matrix:      ${{ steps.build_matrix.outputs.matrix }}
+      domain:      ${{ steps.domain.outputs.domain }}
+      mode:        ${{ steps.build_matrix.outputs.mode }}
+      total_jobs:  ${{ steps.build_matrix.outputs.total_jobs }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract domain
+        id: domain
+        run: |
+          URL="${{ env.WEBSITE_URL }}"
+          DOMAIN=$(echo "$URL" | sed -E 's|https?://||;s|/.*||' | sed 's/[^a-zA-Z0-9]/_/g')
+          DOMAIN="${DOMAIN}_file"
+          echo "domain=$DOMAIN" >> $GITHUB_OUTPUT
+
+      - name: Download initial URLs (initial mode)
+        if: env.REMAINING_RUN_ID == ''
+        uses: actions/download-artifact@v4
+        with:
+          name: initial_urls_round_${{ env.CURRENT_ROUND }}
+          path: remaining_input
+
+      - name: Download merged remaining CSV (retry mode)
+        if: env.REMAINING_RUN_ID != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: remaining_merged
+          run-id: ${{ env.REMAINING_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: remaining_input
+
+      - name: Build matrix
+        id: build_matrix
+        run: |
+          PER_JOB="${{ env.URLS_PER_JOB }}"
+          ROUND="${{ env.CURRENT_ROUND }}"
+          REMAINING_FILE="remaining_input/remaining_merged.csv"
+
+          if [ ! -f "$REMAINING_FILE" ]; then
+            echo "Error: Remaining file $REMAINING_FILE was not generated"
+            exit 1
+          fi
+
+          TOTAL_URLS=$(tail -n +2 "$REMAINING_FILE" | grep -v '^$' | wc -l)
+          echo "Total URLs to process: $TOTAL_URLS"
+
+          if [ "$TOTAL_URLS" -eq 0 ]; then
+            echo "No URLs found — nothing to scrape."
+            echo 'matrix=[]' >> $GITHUB_OUTPUT
+            echo 'mode=empty'  >> $GITHUB_OUTPUT
+            echo 'total_jobs=0' >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          MAX_JOBS=200
+          CHUNK_SIZE=$PER_JOB
+          [ "$CHUNK_SIZE" -lt 1 ] && CHUNK_SIZE=500
+          JOBS=$(( (TOTAL_URLS + CHUNK_SIZE - 1) / CHUNK_SIZE ))
+          [ $JOBS -eq 0 ] && JOBS=1
+          
+          if [ "$JOBS" -gt "$MAX_JOBS" ]; then
+            CHUNK_SIZE=$(( (TOTAL_URLS + MAX_JOBS - 1) / MAX_JOBS ))
+            JOBS=$MAX_JOBS
+            echo "⚠ Adjusted chunk size to $CHUNK_SIZE to stay within $MAX_JOBS job limit"
+          fi
+
+          mkdir -p remaining_chunks
+          HEADER=$(head -n 1 "$REMAINING_FILE")
+          tail -n +2 "$REMAINING_FILE" | grep -v '^$' | split -l "$CHUNK_SIZE" - remaining_chunks/chunk_
+
+          IDX=0
+          for CHUNK_FILE in remaining_chunks/chunk_*; do
+            echo "$HEADER" > "remaining_chunks/urls_${IDX}.csv"
+            cat "$CHUNK_FILE"  >> "remaining_chunks/urls_${IDX}.csv"
+            IDX=$(( IDX + 1 ))
+          done
 
           MATRIX="["
           for ((i=0; i<JOBS; i++)); do
-            OFFSET=$(( i * PER_JOB ))
-            MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$URL\"},"
+            MATRIX+="{\"job_index\":$i},"
           done
           MATRIX="${MATRIX%,}]"
-
+          
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-          echo "Total sitemaps : $TOTAL"
-          echo "Sitemaps/job   : $PER_JOB"
-          echo "Jobs planned   : $JOBS"
+          echo "mode=scrape"    >> $GITHUB_OUTPUT
+          echo "total_jobs=$JOBS" >> $GITHUB_OUTPUT
+          echo "Built matrix: $JOBS jobs for $TOTAL_URLS URLs"
 
+      - name: Upload chunk files
+        if: steps.build_matrix.outputs.mode == 'scrape'
+        uses: actions/upload-artifact@v4
+        with:
+          name: chunks_round_${{ env.CURRENT_ROUND }}
+          path: remaining_chunks/urls_*.csv
+          retention-days: 1
+
+  # ── SCRAPE ────────────────────────────────────────────────────────────────
   scrape:
     needs: plan
+    if: needs.plan.outputs.mode != 'empty'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -73,186 +236,289 @@ jobs:
         include: ${{ fromJson(needs.plan.outputs.matrix) }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests curl_cffi beautifulsoup4 lxml urllib3
+          if [ -f "emma_mason/requirements.txt" ]; then
+            pip install -r emma_mason/requirements.txt
+          else
+            pip install curl_cffi beautifulsoup4 requests lxml urllib3 pandas
+          fi
 
-      - name: Run emmamason scraper
-        env:
-          CURR_URL:             ${{ matrix.url }}
-          SITEMAP_OFFSET:       ${{ matrix.offset }}
-          MAX_SITEMAPS:         ${{ matrix.limit }}
-          MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap }}
-          MAX_WORKERS:          ${{ github.event.inputs.max_workers }}
-          REQUEST_DELAY:        ${{ github.event.inputs.request_delay }}
-        run: |
-          echo "========================================"
-          echo " emmamason Scraper — Job Configuration"
-          echo "========================================"
-          echo "CURR_URL             : $CURR_URL"
-          echo "SITEMAP_OFFSET       : $SITEMAP_OFFSET"
-          echo "MAX_SITEMAPS         : $MAX_SITEMAPS"
-          echo "MAX_URLS_PER_SITEMAP : $MAX_URLS_PER_SITEMAP"
-          echo "MAX_WORKERS          : $MAX_WORKERS"
-          echo "REQUEST_DELAY        : $REQUEST_DELAY"
-          echo "========================================"
+      - name: Create output directory
+        run: mkdir -p output
 
-          python emma_mason/emma_mason.py
-
-          echo ""
-          echo "Generated files:"
-          ls -la media/output/scrapping/emmamason/emmamason_products_chunk_*.csv 2>/dev/null || echo "No CSV files generated"
-
-      - name: Upload chunk artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: chunk_${{ matrix.offset }}
-          path: |
-            media/output/scrapping/emmamason/emmamason_products_chunk_*.csv
-            media/output/scrapping/failure_csv/emmamason_failures.csv
-            media/output/scrapping/failure_csv/emmamason_skipped_plp_*.csv
-          if-no-files-found: warn
-
-  merge:
-    needs: [plan, scrape]
-    runs-on: ubuntu-latest
-    if: always()
-
-    steps:
-      - name: Download all chunk artifacts
+      - name: Download chunk
         uses: actions/download-artifact@v4
         with:
-          path: chunks
-          pattern: chunk_*
+          name: chunks_round_${{ env.CURRENT_ROUND }}
+          path: retry_input
+
+      - name: Run scraper
+        run: |
+          JOB_IDX="${{ matrix.job_index }}"
+          DOMAIN="${{ needs.plan.outputs.domain }}"
+          ROUND="${{ env.CURRENT_ROUND }}"
+          TIMESTAMP="${GITHUB_RUN_ID}"
+          
+          JOB_ID="job${JOB_IDX}_r${ROUND}"
+          CHUNK_BASENAME="urls_${JOB_IDX}.csv"
+          URLS_FILE="retry_input/${CHUNK_BASENAME}"
+          
+          echo "=== Scrape job $JOB_IDX | round=$ROUND ==="
+          echo "Loading URLs from: $URLS_FILE"
+
+          python emma_mason/emma_mason.py \
+            --website-url "${{ env.WEBSITE_URL }}" \
+            --job-id "$JOB_ID" \
+            --output-dir output \
+            --urls-file "$URLS_FILE" \
+            --max-workers "${{ env.MAX_WORKERS }}" \
+            --request-delay "${{ env.REQUEST_DELAY }}" \
+            --verbose
+
+          OUTPUT_CSV=$(ls output/output_*_${JOB_ID}_${TIMESTAMP}.csv 2>/dev/null || echo "")
+          REMAINING_CSV=$(ls output/remaining_*_${JOB_ID}_${TIMESTAMP}.csv 2>/dev/null || \
+                          ls output/remaining_*_${JOB_ID}.csv 2>/dev/null || echo "")
+          UNSCRAPED_CSV=$(ls output/unscraped_*_${JOB_ID}_${TIMESTAMP}.csv 2>/dev/null || \
+                          ls output/unscraped_*_${JOB_ID}.csv 2>/dev/null || echo "")
+
+          # Normalise names for upload
+          if [ -n "$OUTPUT_CSV" ] && [ -f "$OUTPUT_CSV" ]; then
+            cp "$OUTPUT_CSV" "output/result_${DOMAIN}_job${JOB_IDX}_r${ROUND}.csv"
+          else
+            HEADER="Ref Product URL,Ref Product ID,Ref Variant ID,Ref Category,Ref Category URL,Product Type,Ref Brand Name,Collection Name,Ref Product Name,Ref SKU,Ref MPN,Ref GTIN,Ref Price,Ref Main Image,Ref Quantity,Ref Group Attr 1,Ref Group Attr 2,Ref Images,Ref Dimensions,Ref Status,Ref Highlights,Row JSON,Date Scrapped"
+            echo "$HEADER" > "output/result_${DOMAIN}_job${JOB_IDX}_r${ROUND}.csv"
+          fi
+
+          if [ -n "$REMAINING_CSV" ] && [ -f "$REMAINING_CSV" ] && [ "$(wc -l < "$REMAINING_CSV")" -gt 1 ]; then
+            cp "$REMAINING_CSV" "output/remaining_job${JOB_IDX}_r${ROUND}.csv"
+          else
+            echo "url,status,error_type,error_message,failed_at,job_id,chunk_id" > "output/remaining_job${JOB_IDX}_r${ROUND}.csv"
+          fi
+
+          if [ -n "$UNSCRAPED_CSV" ] && [ -f "$UNSCRAPED_CSV" ] && [ "$(wc -l < "$UNSCRAPED_CSV")" -gt 1 ]; then
+            cp "$UNSCRAPED_CSV" "output/unscraped_job${JOB_IDX}_r${ROUND}.csv"
+          else
+            echo "url,reason,status,error_type,error_message,failed_at,job_id,chunk_id" > "output/unscraped_job${JOB_IDX}_r${ROUND}.csv"
+          fi
+
+      - name: Upload scraped output artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: result_job${{ matrix.job_index }}_r${{ env.CURRENT_ROUND }}
+          path: output/result_${{ needs.plan.outputs.domain }}_job${{ matrix.job_index }}_r${{ env.CURRENT_ROUND }}.csv
+          retention-days: 3
+
+      - name: Upload remaining URLs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: remaining_job${{ matrix.job_index }}_r${{ env.CURRENT_ROUND }}
+          path: output/remaining_job${{ matrix.job_index }}_r${{ env.CURRENT_ROUND }}.csv
+          retention-days: 3
+
+      - name: Upload unscraped URLs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: unscraped_job${{ matrix.job_index }}_r${{ env.CURRENT_ROUND }}
+          path: output/unscraped_job${{ matrix.job_index }}_r${{ env.CURRENT_ROUND }}.csv
+          retention-days: 3
+
+  # ── MERGE ─────────────────────────────────────────────────────────────────
+  merge:
+    needs: [plan, scrape]
+    if: always() && !cancelled() && needs.plan.outputs.mode != 'empty'
+    runs-on: ubuntu-latest
+    outputs:
+      filename:          ${{ steps.meta.outputs.name }}
+      has_remaining:     ${{ steps.check_remaining.outputs.has_remaining }}
+      remaining_count:   ${{ steps.check_remaining.outputs.remaining_count }}
+
+    steps:
+      - name: Download result artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result_job*_r${{ env.CURRENT_ROUND }}
+          path: chunks/results
           merge-multiple: true
 
-      - name: Merge CSV chunks
-        id: merge_csv
+      - name: Download remaining artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: remaining_job*_r${{ env.CURRENT_ROUND }}
+          path: chunks/remaining
+          merge-multiple: true
+
+      - name: Download unscraped artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: unscraped_job*_r${{ env.CURRENT_ROUND }}
+          path: chunks/unscraped
+          merge-multiple: true
+
+      - name: Merge scraped outputs
         run: |
-          echo "Merging CSV chunks..."
-
-          CSV_FILES=$(find chunks -name "emmamason_products_chunk_*.csv" 2>/dev/null)
-
+          CSV_FILES=$(find chunks/results -name "*.csv" -type f 2>/dev/null || true)
           if [ -z "$CSV_FILES" ]; then
-            echo "ERROR: No CSV files found!"
-            ls -la chunks/ 2>/dev/null || echo "chunks/ directory not found"
-            exit 1
+            echo "Ref Product URL,Ref Product ID,Ref Variant ID,Ref Category,Ref Category URL,Product Type,Ref Brand Name,Collection Name,Ref Product Name,Ref SKU,Ref MPN,Ref GTIN,Ref Price,Ref Main Image,Ref Quantity,Ref Group Attr 1,Ref Group Attr 2,Ref Images,Ref Dimensions,Ref Status,Ref Highlights,Row JSON,Date Scrapped" > products_full.csv
+          else
+            FIRST=$(echo "$CSV_FILES" | head -n 1)
+            head -n 1 "$FIRST" > products_full.csv
+            for f in $CSV_FILES; do
+              if [ -s "$f" ] && [ "$(wc -l < "$f")" -gt 1 ]; then
+                tail -n +2 "$f" | grep -v '^$' >> products_full.csv
+              fi
+            done
           fi
 
-          echo "Found files:"
-          echo "$CSV_FILES"
-
-          FIRST_FILE=$(echo "$CSV_FILES" | head -n 1)
-          head -n 1 "$FIRST_FILE" > emmamason_products_full.csv
-
-          TOTAL_ROWS=0
-          FILE_COUNT=0
-          for f in $CSV_FILES; do
-            if [ -f "$f" ]; then
-              FILE_COUNT=$((FILE_COUNT + 1))
-              ROWS=$(tail -n +2 "$f" | wc -l)
-              TOTAL_ROWS=$((TOTAL_ROWS + ROWS))
-              echo "  $f — $ROWS rows"
-              tail -n +2 "$f" | sed '/^$/d' >> emmamason_products_full.csv
-            fi
-          done
-
-          FINAL_ROWS=$(tail -n +2 emmamason_products_full.csv | wc -l)
-          echo "Merged: $FINAL_ROWS rows from $FILE_COUNT chunk files"
-
-          echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
-          echo "final_rows=$FINAL_ROWS" >> $GITHUB_OUTPUT
-
-      - name: Merge failure logs
-        if: always()
+      - name: Merge remaining URLs
+        id: check_remaining
         run: |
-          FAIL_FILES=$(find chunks -name "emmamason_failures.csv" 2>/dev/null)
-          if [ -z "$FAIL_FILES" ]; then
-            echo "No failure logs found."
-            exit 0
+          REM_FILES=$(find chunks/remaining -name "*.csv" -type f 2>/dev/null || true)
+          TOTAL_REMAINING=0
+          if [ -z "$REM_FILES" ]; then
+            echo "url,status,error_type,error_message,failed_at,job_id,chunk_id" > remaining_merged.csv
+          else
+            FIRST=$(echo "$REM_FILES" | head -n 1)
+            head -n 1 "$FIRST" > remaining_merged.csv
+            for f in $REM_FILES; do
+              if [ -s "$f" ] && [ "$(wc -l < "$f")" -gt 1 ]; then
+                ROWS=$(tail -n +2 "$f" | grep -v '^$' | wc -l)
+                TOTAL_REMAINING=$((TOTAL_REMAINING + ROWS))
+                tail -n +2 "$f" | grep -v '^$' >> remaining_merged.csv
+              fi
+            done
           fi
+          
+          if [ "$TOTAL_REMAINING" -gt 0 ]; then
+            echo "has_remaining=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_remaining=false" >> $GITHUB_OUTPUT
+          fi
+          echo "remaining_count=$TOTAL_REMAINING" >> $GITHUB_OUTPUT
 
-          FIRST=$(echo "$FAIL_FILES" | head -n 1)
-          head -n 1 "$FIRST" > emmamason_failures_full.csv
-          for f in $FAIL_FILES; do
-            tail -n +2 "$f" | sed '/^$/d' >> emmamason_failures_full.csv
-          done
-
-          FAIL_COUNT=$(tail -n +2 emmamason_failures_full.csv | wc -l)
-          echo "Total failed URLs: $FAIL_COUNT"
-
-      - name: Merge skipped PLP logs
-        if: always()
+      - name: Merge unscraped URLs
         run: |
-          SKIPPED_FILES=$(find chunks -name "emmamason_skipped_plp_*.csv" 2>/dev/null)
-          if [ -z "$SKIPPED_FILES" ]; then
-            echo "No skipped PLP logs found."
-            exit 0
+          UNS_FILES=$(find chunks/unscraped -name "*.csv" -type f 2>/dev/null || true)
+          if [ -z "$UNS_FILES" ]; then
+            echo "url,reason,status,error_type,error_message,failed_at,job_id,chunk_id" > unscraped_merged.csv
+          else
+            FIRST=$(echo "$UNS_FILES" | head -n 1)
+            head -n 1 "$FIRST" > unscraped_merged.csv
+            for f in $UNS_FILES; do
+              if [ -s "$f" ] && [ "$(wc -l < "$f")" -gt 1 ]; then
+                tail -n +2 "$f" | grep -v '^$' >> unscraped_merged.csv
+              fi
+            done
           fi
-
-          FIRST=$(echo "$SKIPPED_FILES" | head -n 1)
-          head -n 1 "$FIRST" > skipped_plp.csv
-          for f in $SKIPPED_FILES; do
-            tail -n +2 "$f" | sed '/^$/d' >> skipped_plp.csv
-          done
-
-          SKIPPED_COUNT=$(tail -n +2 skipped_plp.csv | wc -l)
-          echo "Total skipped PLP URLs: $SKIPPED_COUNT"
 
       - name: Build output filename
         id: meta
         run: |
-          SITE_NAME="${{ needs.plan.outputs.site_name }}"
-          [ -z "$SITE_NAME" ] && SITE_NAME="emmamason"
-          DATE=$(date +%F_%H%M%S)
-          FILENAME="${SITE_NAME}_${DATE}.csv"
+          CLEAN="emmamason"
+          DATE=$(date +%F)
+          ROUND="${{ env.CURRENT_ROUND }}"
+          FILENAME="${CLEAN}_file_r${ROUND}_${DATE}.csv"
           echo "name=$FILENAME" >> $GITHUB_OUTPUT
-          echo "Output filename: $FILENAME"
 
-      - name: Upload to FTP (optional)
+      - name: Upload final product CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.name }}
+          path: products_full.csv
+          retention-days: 7
+
+      - name: Upload merged remaining CSV
+        if: steps.check_remaining.outputs.has_remaining == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: remaining_merged
+          path: remaining_merged.csv
+          retention-days: 2
+
+      - name: Upload merged unscraped CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: unscraped_merged
+          path: unscraped_merged.csv
+          retention-days: 7
+
+      - name: Upload to FTP server
+        if: success()
+        env:
+          FTP_HOST:     ${{ secrets.FTP_HOST || 'ftp-sandbox.1sb.pp.ua' }}
+          FTP_PORT:     ${{ secrets.FTP_PORT || '21' }}
+          FTP_USER:     ${{ secrets.FTP_USER || 'onestop_ftp-sandbox' }}
+          FTP_PASS:     ${{ secrets.FTP_PASS || 'OneStop123' }}
+          FTP_BASE_DIR: ${{ secrets.FTP_PATH || '' }}
+          FILE:         ${{ steps.meta.outputs.name }}
         run: |
-          if [ -z "$FTP_HOST" ] || [ -z "$FTP_USER" ] || [ -z "$FTP_PASS" ]; then
-            echo "FTP credentials not set — skipping upload."
-            exit 0
-          fi
-
-          sudo apt-get update -qq && sudo apt-get install -y lftp
-
+          if [ -z "$FTP_HOST" ]; then exit 0; fi
+          sudo apt-get update -q && sudo apt-get install -y -q lftp
+          RUN_FOLDER="emmamason_file_$(date +%Y%m%d_%H%M%S)"
           lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
           set ftp:ssl-allow no
-          set cmd:fail-exit yes
-          mkdir -p $FTP_BASE_DIR
-          cd $FTP_BASE_DIR
-          put emmamason_products_full.csv -o $FILE
+          set ssl:verify-certificate no
+          mkdir -p $FTP_BASE_DIR/$RUN_FOLDER
+          cd $FTP_BASE_DIR/$RUN_FOLDER
+          put products_full.csv -o $FILE
           bye
           EOF
 
-          echo "FTP upload complete: $FILE"
-        env:
-          FTP_HOST:     ${{ secrets.FTP_HOST }}
-          FTP_USER:     ${{ secrets.FTP_USER }}
-          FTP_PASS:     ${{ secrets.FTP_PASS }}
-          FTP_BASE_DIR: ${{ secrets.FTP_PATH }}
-          FILE:         ${{ steps.meta.outputs.name }}
+      - name: Round summary
+        run: |
+          ROUND="${{ env.CURRENT_ROUND }}"
+          MAX="${{ env.MAX_ROUNDS }}"
+          REMAINING="${{ steps.check_remaining.outputs.remaining_count }}"
+          HAS="${{ steps.check_remaining.outputs.has_remaining }}"
+          echo "══════════════════════════════════════════"
+          echo "  Round $ROUND / $MAX complete"
+          echo "  Remaining URLs: $REMAINING"
+          if [ "$HAS" = "true" ] && [ "$ROUND" -lt "$MAX" ]; then
+            echo "  ➡  Will trigger round $(( ROUND + 1 ))"
+          elif [ "$HAS" = "true" ]; then
+            echo "  ⚠  Max rounds reached — $REMAINING URLs still failing"
+          else
+            echo "  ✅ All URLs resolved!"
+          fi
+          echo "══════════════════════════════════════════"
 
-      - name: Upload merged CSV
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: emmamason_products_full
-          path: |
-            emmamason_products_full.csv
-            emmamason_failures_full.csv
-            skipped_plp.csv
-          if-no-files-found: warn
+  # ── RE-TRIGGER (next round) ───────────────────────────────────────────────
+  trigger_next_round:
+    needs: [merge]
+    if: |
+      always() && !cancelled() &&
+      needs.merge.outputs.has_remaining == 'true' &&
+      fromJson(github.event.inputs.current_round) < fromJson(github.event.inputs.max_rounds)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Calculate next round
+        id: next
+        run: echo "round=$(( ${{ env.CURRENT_ROUND }} + 1 ))" >> $GITHUB_OUTPUT
+
+      - name: Trigger next round via workflow_dispatch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEXT_ROUND="${{ steps.next.outputs.round }}"
+          CURRENT_RUN_ID="${{ github.run_id }}"
+          gh workflow run emma_mason.yml \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}" \
+            --field source_type="${{ env.SOURCE_TYPE }}" \
+            --field ftp_filename="${{ env.FTP_FILENAME }}" \
+            --field sitemap_url="${{ env.SITEMAP_URL }}" \
+            --field direct_urls="${{ env.DIRECT_URLS }}" \
+            --field urls_per_job="${{ env.URLS_PER_JOB }}" \
+            --field max_workers="${{ env.MAX_WORKERS }}" \
+            --field request_delay="${{ env.REQUEST_DELAY }}" \
+            --field max_rounds="${{ env.MAX_ROUNDS }}" \
+            --field current_round="$NEXT_ROUND" \
+            --field remaining_run_id="$CURRENT_RUN_ID"
