@@ -47,7 +47,7 @@ class FastScraperEngine:
     """
     High-Performance Hybrid Scraping Engine:
     1. Uses a SINGLE global FlareSolverr session to solve Cloudflare & extract cookies.
-    2. Shared HTTP session uses FlareSolverr cookies/User-Agent for fast direct HTTP requests (0.1s - 0.3s/URL).
+    2. Shared HTTP session uses FlareSolverr cookies/User-Agent for lightning-fast direct HTTP requests (0.1s - 0.3s/URL).
     3. If FlareSolverr is down or unavailable, falls back directly to HTTP.
     4. If a 403/401 is encountered, thread-safely refreshes FlareSolverr cookies and retries.
     """
@@ -368,20 +368,21 @@ def fetch_json(url: str, crawl_delay=None) -> Optional[dict]:
         return None
     try:
         data_layer = extract_datalayer(data)
-        if not data_layer:
-            return None
+        product_data = (data_layer[0] if isinstance(data_layer, list) else data_layer) if data_layer else {}
 
-        product_data = data_layer[0] if isinstance(data_layer, list) else data_layer
-        is_pdp = product_data.get("ecommerce", {}).get("isPDP", None)
-
+        is_pdp = product_data.get("ecommerce", {}).get("isPDP", None) if product_data else None
         if is_pdp == 0:
             return None
 
         additional_info = extract_additional_product_info(data)
         json_ld_str = extract_json_ld(data)
 
+        if not product_data:
+            product_data = {}
+
         product_data["additional_product_info_html"] = additional_info
         product_data["json_ld_data"] = json_ld_str
+        product_data["raw_json_data"] = json.dumps(data_layer, ensure_ascii=False) if data_layer else json.dumps({})
         return product_data
     except Exception as e:
         log(f"Error processing product page for {url}: {e}", "WARNING")
@@ -432,8 +433,9 @@ def extract_product_data(product_data: dict) -> dict:
                 price = str(ecomm_value)
 
         main_image = ''
-        additional_data = product_data.get('additional_product_info_html', '')
+        additional_data = product_data.get('additional_product_info_html', '{}')
         json_ld_data = product_data.get('json_ld_data', '{}')
+        raw_json_data = product_data.get('raw_json_data', '{}')
 
         mpn = sku
         category = ''
@@ -477,6 +479,7 @@ def extract_product_data(product_data: dict) -> dict:
             'group_attr_2': '',
             'additional_data': additional_data,
             'json_ld_data': json_ld_data,
+            'raw_json_data': raw_json_data,
         }
 
     except Exception as e:
@@ -500,7 +503,7 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict, crawl
         return
 
     product_info = extract_product_data(data)
-    if not product_info.get('product_id'):
+    if not product_info.get('product_id') and not product_info.get('json_ld_data'):
         with csv_lock:
             stats['errors'] += 1
         return
@@ -525,6 +528,7 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict, crawl
             product_info['status'],
             product_info['additional_data'],
             product_info['json_ld_data'],
+            product_info['raw_json_data'],
             SCRAPED_DATE
         ]
 
@@ -604,6 +608,7 @@ def main():
             "Ref Status",
             "Additional Product Data",
             "JSON-LD Data",
+            "Raw JSON Data",
             "Date Scrapped"
         ])
 
