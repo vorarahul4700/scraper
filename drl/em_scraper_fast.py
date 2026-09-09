@@ -23,7 +23,7 @@ SITEMAP_INDEX = f"{CURR_URL}/sitemap.xml"
 SITEMAP_OFFSET = int(os.getenv("SITEMAP_OFFSET", "0"))
 MAX_SITEMAPS = int(os.getenv("MAX_SITEMAPS", "0"))
 MAX_URLS_PER_SITEMAP = int(os.getenv("MAX_URLS_PER_SITEMAP", "0"))
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))
 REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY", "0.2"))
 SAMPLE_SIZE = int(os.getenv("SAMPLE_SIZE", "5"))
 
@@ -41,17 +41,21 @@ def log(msg: str, level: str = "INFO"):
     sys.stderr.write(f"[{timestamp}] [{level}] {msg}\n")
     sys.stderr.flush()
 
-# ================= ENHANCED FLARESOLVERR SESSION MANAGER =================
+# ================= HYBRID FAST FETCH ENGINE =================
 
-class FlareSolverrSessionManager:
+class FastScraperEngine:
     """
-    Manages persistent FlareSolverr browser sessions per thread worker.
-    Supports automatic session destruction & re-creation on 403/401/503 errors.
+    High-Performance Hybrid Scraping Engine:
+    1. Uses a SINGLE global FlareSolverr session to solve Cloudflare & extract cookies.
+    2. Shared HTTP session uses FlareSolverr cookies/User-Agent for lightning-fast direct HTTP requests (0.1s - 0.3s/URL).
+    3. If FlareSolverr is down or unavailable, falls back directly to HTTP.
+    4. If a 403/401 is encountered, thread-safely refreshes FlareSolverr cookies and retries.
     """
     def __init__(self):
-        self.session = requests.Session()
         self.lock = threading.Lock()
-        self.local = threading.local()
+        self.session = requests.Session()
+        self.flaresolverr_available = True
+        self.flaresolverr_session_id = None
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -59,120 +63,124 @@ class FlareSolverrSessionManager:
             "DNT": "1",
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Cache-Control": "max-age=0",
             "Referer": CURR_URL + "/",
         }
+        self.session.headers.update(self.headers)
+        self.check_flaresolverr()
 
-    def _get_thread_session_id(self) -> Optional[str]:
-        """Get or create a persistent FlareSolverr session for the calling thread."""
-        if hasattr(self.local, "session_id") and self.local.session_id:
-            return self.local.session_id
-
-        session_id = self.create_session()
-        self.local.session_id = session_id
-        return session_id
-
-    def create_session(self) -> Optional[str]:
-        """Call FlareSolverr sessions.create to spin up a persistent context."""
+    def check_flaresolverr(self):
+        """Test FlareSolverr connectivity."""
         try:
-            payload = {"cmd": "sessions.create"}
-            resp = self.session.post(FLARESOLVERR_URL, json=payload, timeout=30)
+            resp = requests.post(FLARESOLVERR_URL, json={"cmd": "sessions.list"}, timeout=5)
+            if resp.status_code == 200:
+                log("✓ FlareSolverr service connected successfully", "INFO")
+                self.flaresolverr_available = True
+                self.init_flaresolverr_session()
+            else:
+                log(f"FlareSolverr service returned status {resp.status_code}. Using Direct HTTP mode.", "WARNING")
+                self.flaresolverr_available = False
+        except Exception as e:
+            log(f"FlareSolverr not available ({e}). Running in Direct HTTP mode.", "WARNING")
+            self.flaresolverr_available = False
+
+    def init_flaresolverr_session(self):
+        """Initialize single global FlareSolverr session."""
+        if not self.flaresolverr_available:
+            return
+        with self.lock:
+            if self.flaresolverr_session_id:
+                try:
+                    requests.post(FLARESOLVERR_URL, json={"cmd": "sessions.destroy", "session": self.flaresolverr_session_id}, timeout=10)
+                except Exception:
+                    pass
+                self.flaresolverr_session_id = None
+
+            try:
+                resp = requests.post(FLARESOLVERR_URL, json={"cmd": "sessions.create"}, timeout=30)
+                if resp.status_code == 200 and resp.json().get("status") == "ok":
+                    self.flaresolverr_session_id = resp.json().get("session")
+                    log(f"✓ Initialized Global FlareSolverr Session: {self.flaresolverr_session_id}", "INFO")
+                    # Warm up session and copy cookies
+                    self.solve_and_update_cookies(CURR_URL)
+            except Exception as e:
+                log(f"Error creating FlareSolverr session: {e}", "WARNING")
+
+    def solve_and_update_cookies(self, url: str) -> Optional[str]:
+        """Request URL via FlareSolverr to solve Cloudflare challenge and update cookies."""
+        if not self.flaresolverr_available:
+            return None
+
+        payload = {
+            "cmd": "request.get",
+            "url": url,
+            "maxTimeout": 60000,
+            "headers": self.headers
+        }
+        if self.flaresolverr_session_id:
+            payload["session"] = self.flaresolverr_session_id
+
+        try:
+            resp = requests.post(FLARESOLVERR_URL, json=payload, timeout=FLARESOLVERR_TIMEOUT)
             if resp.status_code == 200:
                 res = resp.json()
                 if res.get("status") == "ok":
-                    sid = res.get("session")
-                    log(f"Created persistent FlareSolverr session: {sid}", "INFO")
-                    return sid
+                    solution = res.get("solution", {})
+                    cookies = solution.get("cookies", [])
+                    user_agent = solution.get("userAgent")
+
+                    if user_agent:
+                        self.session.headers["User-Agent"] = user_agent
+
+                    for c in cookies:
+                        self.session.cookies.set(c.get("name"), c.get("value"), domain=c.get("domain"))
+
+                    log(f"✓ FlareSolverr solved Cloudflare challenge. Updated {len(cookies)} cookies.", "INFO")
+                    return solution.get("response", "")
         except Exception as e:
-            log(f"Failed to create FlareSolverr session: {e}", "WARNING")
+            log(f"FlareSolverr request error for {url}: {e}", "WARNING")
+
         return None
 
-    def destroy_session(self, session_id: str):
-        """Call FlareSolverr sessions.destroy to release a stale/blocked context."""
-        if not session_id:
-            return
-        try:
-            payload = {"cmd": "sessions.destroy", "session": session_id}
-            self.session.post(FLARESOLVERR_URL, json=payload, timeout=15)
-            log(f"Destroyed FlareSolverr session: {session_id}", "INFO")
-        except Exception as e:
-            log(f"Error destroying session {session_id}: {e}", "WARNING")
-
-    def refresh_thread_session(self):
-        """Destroy current thread session and establish a fresh one."""
-        old_sid = getattr(self.local, "session_id", None)
-        if old_sid:
-            self.destroy_session(old_sid)
-        self.local.session_id = self.create_session()
-
-    def flaresolverr_request(self, url: str, max_retries: int = 3) -> Tuple[Optional[str], int]:
+    def fetch(self, url: str, max_retries: int = 3) -> Tuple[Optional[str], int]:
         """
-        Request URL through persistent FlareSolverr session.
-        Auto-refreshes session if a 403, 401, or 503 challenge block is received.
+        Fetch URL with high-speed direct HTTP requests.
+        If blocked (403/401/503), uses FlareSolverr to refresh cookies and retries.
         """
         for attempt in range(max_retries):
-            session_id = self._get_thread_session_id()
-            payload = {
-                "cmd": "request.get",
-                "url": url,
-                "maxTimeout": 60000,
-                "headers": self.headers
-            }
-            if session_id:
-                payload["session"] = session_id
-
             try:
-                response = self.session.post(
-                    FLARESOLVERR_URL,
-                    json=payload,
-                    timeout=FLARESOLVERR_TIMEOUT
-                )
+                # Fast direct HTTP request
+                resp = self.session.get(url, timeout=15)
 
-                if response.status_code == 200:
-                    result = response.json()
-                    status_text = result.get("status")
+                if resp.status_code == 200:
+                    return resp.text, 200
 
-                    if status_text == "ok":
-                        solution = result.get("solution", {})
-                        http_code = solution.get("status", 200)
-                        content = solution.get("response", "")
-
-                        # If FlareSolverr solved it successfully with 200
-                        if http_code == 200 and content:
+                if resp.status_code in [403, 401, 503] and self.flaresolverr_available:
+                    log(f"HTTP {resp.status_code} on fast fetch for {url}. Refreshing Cloudflare cookies via FlareSolverr...", "WARNING")
+                    with self.lock:
+                        content = self.solve_and_update_cookies(url)
+                        if content:
                             return content, 200
+                        # Re-create session if solve failed
+                        self.init_flaresolverr_session()
 
-                        # If target site returned 403 / 401 / 503 despite FlareSolverr solution
-                        if http_code in [403, 401, 503]:
-                            log(f"HTTP {http_code} received on session {session_id}. Refreshing session and retrying...", "WARNING")
-                            self.refresh_thread_session()
-                            time.sleep(1.0 + attempt)
-                            continue
+                    time.sleep(1.0)
+                    continue
 
-                        return content, http_code
+                if resp.status_code == 404:
+                    return None, 404
 
-                log(f"FlareSolverr returned status {response.status_code} for {url} (attempt {attempt + 1})", "WARNING")
-
-            except requests.exceptions.Timeout:
-                log(f"FlareSolverr timeout on attempt {attempt + 1} for {url}", "WARNING")
-            except requests.exceptions.ConnectionError:
-                log(f"FlareSolverr connection error on attempt {attempt + 1} for {url}", "WARNING")
-            except Exception as e:
-                log(f"FlareSolverr exception on attempt {attempt + 1} for {url}: {e}", "WARNING")
-
-            # On error, refresh session and retry
-            self.refresh_thread_session()
-            time.sleep(1.5 ** attempt)
+            except requests.exceptions.RequestException as e:
+                log(f"Direct request attempt {attempt + 1} failed for {url}: {e}", "WARNING")
+                if self.flaresolverr_available:
+                    with self.lock:
+                        content = self.solve_and_update_cookies(url)
+                        if content:
+                            return content, 200
+                time.sleep(1.0)
 
         return None, 0
 
-    def fetch(self, url: str) -> Tuple[Optional[str], int]:
-        return self.flaresolverr_request(url)
-
-flaresolverr_manager = FlareSolverrSessionManager()
+engine = FastScraperEngine()
 
 # ================= REQUEST MANAGER =================
 
@@ -196,19 +204,8 @@ class RequestManager:
 
     def fetch(self, url: str, crawl_delay=None) -> Optional[str]:
         self._respect_rate_limit(crawl_delay)
-        content, status = flaresolverr_manager.fetch(url)
-
-        if content and status == 200:
-            return content
-
-        if status in [403, 401, 503]:
-            log(f"HTTP {status} for {url} after session refresh", "ERROR")
-            return None
-        elif status == 404:
-            log(f"URL not found (404): {url}", "WARNING")
-            return None
-
-        return None
+        content, status = engine.fetch(url)
+        return content if status == 200 else None
 
 request_manager = RequestManager()
 
@@ -230,7 +227,7 @@ def check_robots_txt():
     robots_url = f"{CURR_URL}/robots.txt"
     log(f"Checking robots.txt: {robots_url}")
 
-    content, status = flaresolverr_manager.fetch(robots_url)
+    content, status = engine.fetch(robots_url)
     if content and status == 200:
         lines = content.split('\n')
         crawl_delay = None
@@ -519,12 +516,12 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict, crawl
 
 def main():
     crawl_delay, robots_sitemap = check_robots_txt()
-    crawl_delay = 0  # High-speed parallel setting
+    crawl_delay = 0
     sitemap = robots_sitemap if (robots_sitemap and robots_sitemap.startswith('http')) else SITEMAP_INDEX
 
     log("=" * 60)
     log("Emma Mason High-Performance Fast Scraper")
-    log(f"FlareSolverr URL: {FLARESOLVERR_URL}")
+    log(f"FlareSolverr Available: {engine.flaresolverr_available}")
     log(f"Base URL: {CURR_URL}")
     log(f"Sitemap Index: {sitemap}")
     log(f"Sitemap Offset: {SITEMAP_OFFSET}")
