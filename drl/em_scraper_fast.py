@@ -100,7 +100,6 @@ class FastScraperEngine:
                 if resp.status_code == 200 and resp.json().get("status") == "ok":
                     self.flaresolverr_session_id = resp.json().get("session")
                     log(f"✓ Initialized Global FlareSolverr Session: {self.flaresolverr_session_id}", "INFO")
-                    # Warm up session and copy cookies
                     self.solve_and_update_cookies(CURR_URL)
             except Exception as e:
                 log(f"Error creating FlareSolverr session: {e}", "WARNING")
@@ -148,7 +147,6 @@ class FastScraperEngine:
         """
         for attempt in range(max_retries):
             try:
-                # Fast direct HTTP request
                 resp = self.session.get(url, timeout=15)
 
                 if resp.status_code == 200:
@@ -160,7 +158,6 @@ class FastScraperEngine:
                         content = self.solve_and_update_cookies(url)
                         if content:
                             return content, 200
-                        # Re-create session if solve failed
                         self.init_flaresolverr_session()
 
                     time.sleep(1.0)
@@ -309,6 +306,7 @@ def extract_datalayer(html_text: str):
     return _clean_strings(data)
 
 def extract_additional_product_info(html_text: str) -> str:
+    """Extract Magento specifications table key-values."""
     try:
         soup = BeautifulSoup(html_text, 'html.parser')
         table = soup.find('table', id='product-attribute-specs-table')
@@ -340,24 +338,51 @@ def extract_additional_product_info(html_text: str) -> str:
         log(f"Error extracting additional attributes table: {e}", "WARNING")
         return json.dumps({})
 
+def extract_json_ld(html_text: str) -> str:
+    """Extract schema.org JSON-LD scripts (<script type='application/ld+json'>)."""
+    try:
+        soup = BeautifulSoup(html_text, 'html.parser')
+        scripts = soup.find_all('script', type='application/ld+json')
+        ld_blocks = []
+        for s in scripts:
+            if s.string:
+                try:
+                    parsed = json.loads(s.string.strip())
+                    ld_blocks.append(parsed)
+                except Exception:
+                    pass
+
+        if not ld_blocks:
+            return json.dumps({})
+
+        result = ld_blocks[0] if len(ld_blocks) == 1 else ld_blocks
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        log(f"Error extracting JSON-LD script: {e}", "DEBUG")
+        return json.dumps({})
+
 def fetch_json(url: str, crawl_delay=None) -> Optional[dict]:
-    """Fetch HTML page and parse dataLayer + Magento specs."""
+    """Fetch HTML page and parse dataLayer, Magento specs, and JSON-LD structured data."""
     data = http_get(url, crawl_delay)
     if not data:
         return None
     try:
         data_layer = extract_datalayer(data)
-        if not data_layer:
-            return None
+        product_data = (data_layer[0] if isinstance(data_layer, list) else data_layer) if data_layer else {}
 
-        product_data = data_layer[0] if isinstance(data_layer, list) else data_layer
-        is_pdp = product_data.get("ecommerce", {}).get("isPDP", None)
-
+        is_pdp = product_data.get("ecommerce", {}).get("isPDP", None) if product_data else None
         if is_pdp == 0:
             return None
 
         additional_info = extract_additional_product_info(data)
+        json_ld_str = extract_json_ld(data)
+
+        if not product_data:
+            product_data = {}
+
         product_data["additional_product_info_html"] = additional_info
+        product_data["json_ld_data"] = json_ld_str
+        product_data["raw_json_data"] = json.dumps(data_layer, ensure_ascii=False) if data_layer else json.dumps({})
         return product_data
     except Exception as e:
         log(f"Error processing product page for {url}: {e}", "WARNING")
@@ -408,7 +433,10 @@ def extract_product_data(product_data: dict) -> dict:
                 price = str(ecomm_value)
 
         main_image = ''
-        additional_data = product_data.get('additional_product_info_html', '')
+        additional_data = product_data.get('additional_product_info_html', '{}')
+        json_ld_data = product_data.get('json_ld_data', '{}')
+        raw_json_data = product_data.get('raw_json_data', '{}')
+
         mpn = sku
         category = ''
 
@@ -450,6 +478,8 @@ def extract_product_data(product_data: dict) -> dict:
             'group_attr_1': '',
             'group_attr_2': '',
             'additional_data': additional_data,
+            'json_ld_data': json_ld_data,
+            'raw_json_data': raw_json_data,
         }
 
     except Exception as e:
@@ -473,7 +503,7 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict, crawl
         return
 
     product_info = extract_product_data(data)
-    if not product_info.get('product_id'):
+    if not product_info.get('product_id') and not product_info.get('json_ld_data'):
         with csv_lock:
             stats['errors'] += 1
         return
@@ -497,6 +527,8 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict, crawl
             product_info['group_attr_2'],
             product_info['status'],
             product_info['additional_data'],
+            product_info['json_ld_data'],
+            product_info['raw_json_data'],
             SCRAPED_DATE
         ]
 
@@ -575,6 +607,8 @@ def main():
             "Ref Group Attr 2",
             "Ref Status",
             "Additional Product Data",
+            "JSON-LD Data",
+            "Raw JSON Data",
             "Date Scrapped"
         ])
 
