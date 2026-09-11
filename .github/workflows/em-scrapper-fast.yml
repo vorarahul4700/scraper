@@ -16,6 +16,9 @@ on:
       specific_offsets:
         description: "Specific sitemap offsets (comma-separated, e.g. 21,3,40,39)"
         default: ""
+      max_parallel_jobs:
+        description: "Max parallel runner jobs to execute at once"
+        default: "2"
       urls_per_sitemap:
         description: "Max URLs per sitemap"
         default: "100"
@@ -84,6 +87,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJson(github.event.inputs.max_parallel_jobs || '2') }}
       matrix:
         include: ${{ fromJson(needs.plan.outputs.matrix) }}
     
@@ -297,6 +301,7 @@ jobs:
           echo "  Sitemaps/Job:  ${{ github.event.inputs.sitemaps_per_job }}"
           echo "  Total Sitemaps: ${{ github.event.inputs.total_sitemaps }}"
           echo "  Specific Offsets: ${{ github.event.inputs.specific_offsets }}"
+          echo "  Max Parallel Jobs: ${{ github.event.inputs.max_parallel_jobs }}"
           echo "  FlareSolverr:  Enabled (Persistent Sessions)"
           echo "========================================="
           
