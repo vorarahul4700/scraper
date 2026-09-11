@@ -22,6 +22,7 @@ CURR_URL = os.getenv("CURR_URL", "https://www.emmamason.com").rstrip("/")
 SITEMAP_INDEX = f"{CURR_URL}/sitemap.xml"
 SITEMAP_OFFSET = int(os.getenv("SITEMAP_OFFSET", "0"))
 MAX_SITEMAPS = int(os.getenv("MAX_SITEMAPS", "0"))
+SPECIFIC_OFFSETS = os.getenv("SPECIFIC_OFFSETS", "").strip()
 MAX_URLS_PER_SITEMAP = int(os.getenv("MAX_URLS_PER_SITEMAP", "0"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))
 REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY", "0.2"))
@@ -547,6 +548,7 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict, crawl
 # ================= MAIN EXECUTION =================
 
 def main():
+    global OUTPUT_CSV
     crawl_delay, robots_sitemap = check_robots_txt()
     crawl_delay = 0
     sitemap = robots_sitemap if (robots_sitemap and robots_sitemap.startswith('http')) else SITEMAP_INDEX
@@ -556,8 +558,11 @@ def main():
     log(f"FlareSolverr Available: {engine.flaresolverr_available}")
     log(f"Base URL: {CURR_URL}")
     log(f"Sitemap Index: {sitemap}")
-    log(f"Sitemap Offset: {SITEMAP_OFFSET}")
-    log(f"Max Sitemaps: {MAX_SITEMAPS if MAX_SITEMAPS > 0 else 'All'}")
+    if SPECIFIC_OFFSETS:
+        log(f"Specific Offsets: {SPECIFIC_OFFSETS}")
+    else:
+        log(f"Sitemap Offset: {SITEMAP_OFFSET}")
+        log(f"Max Sitemaps: {MAX_SITEMAPS if MAX_SITEMAPS > 0 else 'All'}")
     log(f"Max URLs per Sitemap: {MAX_URLS_PER_SITEMAP if MAX_URLS_PER_SITEMAP > 0 else 'All'}")
     log(f"Max Workers: {MAX_WORKERS}")
     log(f"Request Delay Base: {REQUEST_DELAY_BASE}s")
@@ -577,12 +582,25 @@ def main():
             sitemaps = [e.text.strip() for e in elements if e.text]
             break
 
-    if SITEMAP_OFFSET >= len(sitemaps):
-        log(f"Offset {SITEMAP_OFFSET} exceeds total sitemaps ({len(sitemaps)})", "WARNING")
-        sys.exit(0)
+    if SPECIFIC_OFFSETS:
+        offset_indices = [int(x.strip()) for x in SPECIFIC_OFFSETS.split(",") if x.strip().isdigit()]
+        sitemaps_to_process = []
+        for idx in offset_indices:
+            if 0 <= idx < len(sitemaps):
+                sitemaps_to_process.append(sitemaps[idx])
+            else:
+                log(f"Offset index {idx} out of range (total sitemaps: {len(sitemaps)})", "WARNING")
+        
+        clean_spec = re.sub(r'[^0-9_]', '_', SPECIFIC_OFFSETS.replace(" ", "").replace(",", "_"))
+        OUTPUT_CSV = f"products_chunk_{clean_spec}.csv"
+    else:
+        if SITEMAP_OFFSET >= len(sitemaps):
+            log(f"Offset {SITEMAP_OFFSET} exceeds total sitemaps ({len(sitemaps)})", "WARNING")
+            sys.exit(0)
 
-    end_index = SITEMAP_OFFSET + MAX_SITEMAPS if MAX_SITEMAPS > 0 else len(sitemaps)
-    sitemaps_to_process = sitemaps[SITEMAP_OFFSET:end_index]
+        end_index = SITEMAP_OFFSET + MAX_SITEMAPS if MAX_SITEMAPS > 0 else len(sitemaps)
+        sitemaps_to_process = sitemaps[SITEMAP_OFFSET:end_index]
+        OUTPUT_CSV = f"products_chunk_{SITEMAP_OFFSET}.csv"
 
     log(f"Total sitemaps found: {len(sitemaps)}")
     log(f"Sitemaps to process in this job: {len(sitemaps_to_process)}")

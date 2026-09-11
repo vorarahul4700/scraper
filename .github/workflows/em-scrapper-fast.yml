@@ -13,6 +13,9 @@ on:
       sitemaps_per_job:
         description: "Sitemaps per parallel job"
         default: "2"
+      specific_offsets:
+        description: "Specific sitemap offsets (comma-separated, e.g. 21,3,40,39)"
+        default: ""
       urls_per_sitemap:
         description: "Max URLs per sitemap"
         default: "100"
@@ -46,25 +49,35 @@ jobs:
           TOTAL=${{ github.event.inputs.total_sitemaps }}
           PER_JOB=${{ github.event.inputs.sitemaps_per_job }}
           URL="${{ github.event.inputs.url }}"
-          
-          if [ "$TOTAL" -eq 0 ]; then
-            echo "Using default total sitemaps: 10"
-            TOTAL=10
-          fi
-          
-          JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))
+          SPECIFIC="${{ github.event.inputs.specific_offsets }}"
           
           MATRIX="["
-          for ((i=0;i<JOBS;i++)); do
-            OFFSET=$(( i * PER_JOB ))
-            MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$URL\"},"
-          done
+          if [ -n "$SPECIFIC" ]; then
+            echo "Processing specific offsets: $SPECIFIC"
+            IFS=',' read -ra OFFSETS <<< "$SPECIFIC"
+            for off in "${OFFSETS[@]}"; do
+              CLEAN_OFF=$(echo "$off" | tr -d ' ')
+              if [ -n "$CLEAN_OFF" ]; then
+                MATRIX+="{\"offset\":$CLEAN_OFF,\"limit\":1,\"url\":\"$URL\"},"
+              fi
+            done
+          else
+            if [ "$TOTAL" -eq 0 ]; then
+              echo "Using default total sitemaps: 10"
+              TOTAL=10
+            fi
+            
+            JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))
+            
+            for ((i=0;i<JOBS;i++)); do
+              OFFSET=$(( i * PER_JOB ))
+              MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$URL\"},"
+            done
+          fi
           MATRIX="${MATRIX%,}]"
           
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-          echo "Total sitemaps: $TOTAL"
-          echo "Sitemaps per job: $PER_JOB"
-          echo "Jobs planned: $JOBS"
+          echo "Matrix planned: $MATRIX"
 
   scrape:
     needs: plan
@@ -283,6 +296,7 @@ jobs:
           echo "  URLs/Sitemap:  ${{ github.event.inputs.urls_per_sitemap }}"
           echo "  Sitemaps/Job:  ${{ github.event.inputs.sitemaps_per_job }}"
           echo "  Total Sitemaps: ${{ github.event.inputs.total_sitemaps }}"
+          echo "  Specific Offsets: ${{ github.event.inputs.specific_offsets }}"
           echo "  FlareSolverr:  Enabled (Persistent Sessions)"
           echo "========================================="
           
