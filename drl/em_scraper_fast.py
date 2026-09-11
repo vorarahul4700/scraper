@@ -132,7 +132,10 @@ class FastScraperEngine:
                         self.session.headers["User-Agent"] = user_agent
 
                     for c in cookies:
-                        self.session.cookies.set(c.get("name"), c.get("value"), domain=c.get("domain"))
+                        c_domain = c.get("domain", "")
+                        self.session.cookies.set(c.get("name"), c.get("value"), domain=c_domain)
+                        if c_domain and not c_domain.startswith("."):
+                            self.session.cookies.set(c.get("name"), c.get("value"), domain=f".{c_domain}")
 
                     log(f"✓ FlareSolverr solved Cloudflare challenge. Updated {len(cookies)} cookies.", "INFO")
                     return solution.get("response", "")
@@ -146,9 +149,11 @@ class FastScraperEngine:
         Fetch URL with high-speed direct HTTP requests.
         If blocked (403/401/503), uses FlareSolverr to refresh cookies and retries.
         """
+        last_status = 0
         for attempt in range(max_retries):
             try:
                 resp = self.session.get(url, timeout=15)
+                last_status = resp.status_code
 
                 if resp.status_code == 200:
                     return resp.text, 200
@@ -176,7 +181,7 @@ class FastScraperEngine:
                             return content, 200
                 time.sleep(1.0)
 
-        return None, 0
+        return None, last_status
 
 engine = FastScraperEngine()
 
@@ -200,12 +205,18 @@ class RequestManager:
             self.last_request_time = time.time()
             self.request_count += 1
 
-    def fetch(self, url: str, crawl_delay=None) -> Optional[str]:
+    def fetch_with_status(self, url: str, crawl_delay=None) -> Tuple[Optional[str], int]:
         self._respect_rate_limit(crawl_delay)
-        content, status = engine.fetch(url)
-        return content if status == 200 else None
+        return engine.fetch(url)
+
+    def fetch(self, url: str, crawl_delay=None) -> Optional[str]:
+        content, _ = self.fetch_with_status(url, crawl_delay)
+        return content
 
 request_manager = RequestManager()
+
+def http_get_with_status(url: str, crawl_delay=None) -> Tuple[Optional[str], int]:
+    return request_manager.fetch_with_status(url, crawl_delay=crawl_delay)
 
 def http_get(url: str, crawl_delay=None) -> Optional[str]:
     return request_manager.fetch(url, crawl_delay=crawl_delay)
@@ -362,18 +373,18 @@ def extract_json_ld(html_text: str) -> str:
         log(f"Error extracting JSON-LD script: {e}", "DEBUG")
         return json.dumps({})
 
-def fetch_json(url: str, crawl_delay=None) -> Optional[dict]:
+def fetch_json(url: str, crawl_delay=None) -> Tuple[Optional[dict], str]:
     """Fetch HTML page and parse dataLayer, Magento specs, and JSON-LD structured data."""
-    data = http_get(url, crawl_delay)
+    data, status = http_get_with_status(url, crawl_delay)
     if not data:
-        return None
+        return None, f"HTTP status {status}" if status else "HTTP request failed"
     try:
         data_layer = extract_datalayer(data)
         product_data = (data_layer[0] if isinstance(data_layer, list) else data_layer) if data_layer else {}
 
         is_pdp = product_data.get("ecommerce", {}).get("isPDP", None) if product_data else None
         if is_pdp == 0:
-            return None
+            return None, "Not a PDP page (isPDP == 0)"
 
         additional_info = extract_additional_product_info(data)
         json_ld_str = extract_json_ld(data)
@@ -384,10 +395,10 @@ def fetch_json(url: str, crawl_delay=None) -> Optional[dict]:
         product_data["additional_product_info_html"] = additional_info
         product_data["json_ld_data"] = json_ld_str
         product_data["raw_json_data"] = json.dumps(data_layer, ensure_ascii=False) if data_layer else json.dumps({})
-        return product_data
+        return product_data, "OK"
     except Exception as e:
         log(f"Error processing product page for {url}: {e}", "WARNING")
-        return None
+        return None, f"Exception: {e}"
 
 def normalize_image_url(url: str) -> str:
     if not url:
@@ -496,15 +507,17 @@ def process_product_data(product_url: str, writer, seen: set, stats: dict, crawl
         seen.add(product_url)
 
     log(f"Processing product: {product_url}", "DEBUG")
-    data = fetch_json(product_url, crawl_delay)
+    data, reason = fetch_json(product_url, crawl_delay)
 
     if not data:
+        log(f"Failed to fetch product [{reason}]: {product_url}", "WARNING")
         with csv_lock:
             stats['errors'] += 1
         return
 
     product_info = extract_product_data(data)
     if not product_info.get('product_id') and not product_info.get('json_ld_data'):
+        log(f"Missing product_id and json_ld_data for: {product_url}", "WARNING")
         with csv_lock:
             stats['errors'] += 1
         return
