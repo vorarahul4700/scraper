@@ -1,0 +1,360 @@
+name: DRL / TVS / DRO / BFD Scraper Fast with FlareSolverr
+
+on:
+  workflow_dispatch:
+    inputs:
+      store:
+        description: "Choose store to scrape"
+        required: true
+        type: choice
+        options:
+          - "bedroom-furniture-discounts"
+          - "discount-living-rooms"
+          - "dining-rooms-outlet"
+          - "tv-stands-outlet"
+          - "custom"
+        default: "bedroom-furniture-discounts"
+      custom_url:
+        description: "Custom base site URL (only if store is 'custom')"
+        default: ""
+      custom_sitemap:
+        description: "Custom sitemap index URL (optional override)"
+        default: ""
+      total_sitemaps:
+        description: "Total sitemaps to process (0 = auto/10)"
+        default: "0"
+      sitemaps_per_job:
+        description: "Sitemaps per parallel job"
+        default: "2"
+      specific_offsets:
+        description: "Specific sitemap offsets (comma-separated, e.g. 0,2,4)"
+        default: ""
+      max_parallel_jobs:
+        description: "Max parallel runner jobs to execute at once"
+        default: "3"
+      urls_per_sitemap:
+        description: "Max URLs per sitemap (0 = all)"
+        default: "100"
+      max_workers:
+        description: "Parallel worker threads per job"
+        default: "6"
+      request_delay:
+        description: "Delay between requests in seconds"
+        default: "0.3"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      site_name: ${{ steps.resolve_store.outputs.site_name }}
+      base_url: ${{ steps.resolve_store.outputs.base_url }}
+      sitemap_url: ${{ steps.resolve_store.outputs.sitemap_url }}
+    steps:
+      - name: Resolve Store Configuration
+        id: resolve_store
+        run: |
+          STORE="${{ github.event.inputs.store }}"
+          CUSTOM_URL="${{ github.event.inputs.custom_url }}"
+          CUSTOM_SITEMAP="${{ github.event.inputs.custom_sitemap }}"
+
+          case "$STORE" in
+            "bedroom-furniture-discounts")
+              BASE_URL="https://www.bedroomfurniturediscounts.com"
+              SITEMAP_URL="https://www.bedroomfurniturediscounts.com/sitemaps/sitemap.xml"
+              SITE_NAME="bedroomfurniturediscounts"
+              ;;
+            "discount-living-rooms")
+              BASE_URL="https://www.discountlivingrooms.com"
+              SITEMAP_URL="https://www.discountlivingrooms.com/sitemaps/sitemap_discount.xml"
+              SITE_NAME="discountlivingrooms"
+              ;;
+            "dining-rooms-outlet")
+              BASE_URL="https://www.diningroomsoutlet.com"
+              SITEMAP_URL="https://www.diningroomsoutlet.com/sitemaps/sitemap_diningrooms.xml"
+              SITE_NAME="diningroomsoutlet"
+              ;;
+            "tv-stands-outlet")
+              BASE_URL="https://www.tvstandsoutlet.com"
+              SITEMAP_URL="https://www.tvstandsoutlet.com/sitemaps/sitemap_tvstands.xml"
+              SITE_NAME="tvstandsoutlet"
+              ;;
+            "custom")
+              BASE_URL="$CUSTOM_URL"
+              SITEMAP_URL="$CUSTOM_SITEMAP"
+              if [ -z "$SITEMAP_URL" ]; then
+                SITEMAP_URL="${BASE_URL%/}/sitemaps/sitemap.xml"
+              fi
+              SITE_NAME=$(echo "$BASE_URL" | sed -E 's|https?://||;s|www\.||;s|\.[a-zA-Z]+(/.*)?$||;s|/.*||')
+              ;;
+          esac
+
+          if [ -n "$CUSTOM_SITEMAP" ]; then
+            SITEMAP_URL="$CUSTOM_SITEMAP"
+          fi
+
+          echo "base_url=$BASE_URL" >> $GITHUB_OUTPUT
+          echo "sitemap_url=$SITEMAP_URL" >> $GITHUB_OUTPUT
+          echo "site_name=$SITE_NAME" >> $GITHUB_OUTPUT
+
+          echo "========================================="
+          echo "Resolved Store: $STORE"
+          echo "Base URL:       $BASE_URL"
+          echo "Sitemap URL:    $SITEMAP_URL"
+          echo "Site Name:      $SITE_NAME"
+          echo "========================================="
+
+      - name: Generate Matrix
+        id: matrix
+        run: |
+          TOTAL=${{ github.event.inputs.total_sitemaps }}
+          PER_JOB=${{ github.event.inputs.sitemaps_per_job }}
+          BASE_URL="${{ steps.resolve_store.outputs.base_url }}"
+          SITEMAP_URL="${{ steps.resolve_store.outputs.sitemap_url }}"
+          SPECIFIC="${{ github.event.inputs.specific_offsets }}"
+
+          MATRIX="["
+          if [ -n "$SPECIFIC" ]; then
+            echo "Building matrix from specific offsets: $SPECIFIC"
+            IFS=',' read -ra OFFSETS <<< "$SPECIFIC"
+            for off in "${OFFSETS[@]}"; do
+              CLEAN_OFF=$(echo "$off" | tr -d ' ')
+              if [ -n "$CLEAN_OFF" ]; then
+                MATRIX+="{\"offset\":$CLEAN_OFF,\"limit\":1,\"url\":\"$BASE_URL\",\"sitemap\":\"$SITEMAP_URL\"},"
+              fi
+            done
+          else
+            if [ "$TOTAL" -eq 0 ]; then
+              echo "Auto total sitemaps: defaulting to 10"
+              TOTAL=10
+            fi
+
+            JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))
+
+            for ((i=0;i<JOBS;i++)); do
+              OFFSET=$(( i * PER_JOB ))
+              MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$BASE_URL\",\"sitemap\":\"$SITEMAP_URL\"},"
+            done
+          fi
+          MATRIX="${MATRIX%,}]"
+
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "Matrix planned: $MATRIX"
+
+  scrape:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJson(github.event.inputs.max_parallel_jobs || '3') }}
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.matrix) }}
+
+    services:
+      flaresolverr:
+        image: ghcr.io/flaresolverr/flaresolverr:latest
+        ports:
+          - 8191:8191
+        options: --cap-add=SYS_ADMIN
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wait for FlareSolverr to be ready
+        run: |
+          echo "Waiting for FlareSolverr service container on http://localhost:8191/v1..."
+          sleep 5
+
+          for i in {1..30}; do
+            if curl -s -f -X POST http://localhost:8191/v1 \
+              -H "Content-Type: application/json" \
+              -d '{"cmd": "sessions.list"}' > /dev/null 2>&1; then
+              echo "✓ FlareSolverr is ready and responsive!"
+              break
+            fi
+            echo "Attempt $i: FlareSolverr not ready yet..."
+            sleep 2
+
+            if [ $i -eq 30 ]; then
+              echo "❌ FlareSolverr failed to start in 60s"
+              docker logs flaresolverr || true
+              exit 1
+            fi
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 lxml
+
+      - name: Run FlareSolverr scraper
+        env:
+          TARGET_STORE: ${{ github.event.inputs.store }}
+          CURR_URL: ${{ matrix.url }}
+          SITEMAP_INDEX: ${{ matrix.sitemap }}
+          SITEMAP_OFFSET: ${{ matrix.offset }}
+          MAX_SITEMAPS: ${{ matrix.limit }}
+          MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap }}
+          MAX_WORKERS: ${{ github.event.inputs.max_workers }}
+          REQUEST_DELAY: ${{ github.event.inputs.request_delay }}
+          FLARESOLVERR_URL: http://localhost:8191/v1
+        run: |
+          echo "Starting fast scraper job:"
+          echo "Store:          ${{ github.event.inputs.store }}"
+          echo "CURR_URL:       $CURR_URL"
+          echo "SITEMAP_INDEX:  $SITEMAP_INDEX"
+          echo "SITEMAP_OFFSET: $SITEMAP_OFFSET"
+          echo "MAX_SITEMAPS:   $MAX_SITEMAPS"
+          echo "MAX_WORKERS:    $MAX_WORKERS"
+          echo "REQUEST_DELAY:  $REQUEST_DELAY"
+          echo ""
+
+          python drl/drl_scraper_fast.py
+
+          echo ""
+          echo "Generated CSV chunk files:"
+          ls -la products_chunk_*.csv 2>/dev/null || echo "No CSV chunk generated"
+
+      - name: Upload chunk artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chunk_${{ matrix.offset }}
+          path: products_chunk_*.csv
+          if-no-files-found: warn
+
+  merge:
+    needs: [plan, scrape]
+    runs-on: ubuntu-latest
+    if: always() && !cancelled()
+
+    steps:
+      - name: Download all chunks
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          path: chunks
+          pattern: chunk_*
+          merge-multiple: true
+
+      - name: Check for CSV chunk files
+        id: check_files
+        run: |
+          CSV_FILES=$(find chunks -name "products_chunk_*.csv" 2>/dev/null || echo "")
+
+          if [ -z "$CSV_FILES" ]; then
+            echo "has_files=false" >> $GITHUB_OUTPUT
+            echo "WARNING: No CSV chunks found to merge."
+          else
+            echo "has_files=true" >> $GITHUB_OUTPUT
+            CHUNK_COUNT=$(echo "$CSV_FILES" | wc -l)
+            echo "chunk_count=$CHUNK_COUNT" >> $GITHUB_OUTPUT
+            echo "Found $CHUNK_COUNT CSV chunks to merge."
+          fi
+
+      - name: Merge CSV chunks
+        id: merge_csv
+        if: steps.check_files.outputs.has_files == 'true'
+        run: |
+          echo "Merging all CSV chunk files..."
+          CSV_FILES=$(find chunks -name "products_chunk_*.csv")
+          FIRST_FILE=$(echo "$CSV_FILES" | head -n 1)
+
+          # Extract header from first chunk
+          head -n 1 "$FIRST_FILE" > products_full.csv
+
+          FILE_COUNT=0
+          TOTAL_ROWS=0
+          for f in $CSV_FILES; do
+            if [ -f "$f" ]; then
+              FILE_COUNT=$((FILE_COUNT + 1))
+              ROWS=$(tail -n +2 "$f" 2>/dev/null | wc -l || echo "0")
+              TOTAL_ROWS=$((TOTAL_ROWS + ROWS))
+              echo "Merging chunk $f ($ROWS rows)"
+              tail -n +2 "$f" 2>/dev/null | sed '/^$/d' >> products_full.csv
+            fi
+          done
+
+          FINAL_ROWS=$(tail -n +2 products_full.csv 2>/dev/null | wc -l || echo "0")
+          echo "Total merged product rows: $FINAL_ROWS from $FILE_COUNT files"
+          echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+          echo "final_rows=$FINAL_ROWS" >> $GITHUB_OUTPUT
+
+      - name: Build output filename
+        id: meta
+        run: |
+          SITE_NAME="${{ needs.plan.outputs.site_name }}"
+          if [ -z "$SITE_NAME" ]; then
+            SITE_NAME="furniture_store"
+          fi
+          DATE=$(date +%F_%H%M%S)
+          echo "name=${SITE_NAME}_${DATE}.csv" >> $GITHUB_OUTPUT
+          if [ -f products_full.csv ]; then
+            cp products_full.csv "${SITE_NAME}_${DATE}.csv"
+          fi
+
+      - name: Upload to FTP (if configured)
+        if: steps.merge_csv.outputs.final_rows > 0
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_BASE_DIR: ${{ secrets.FTP_PATH }}
+          FILE: ${{ steps.meta.outputs.name }}
+        run: |
+          if [ -z "$FTP_HOST" ] || [ -z "$FTP_USER" ] || [ -z "$FTP_PASS" ]; then
+            echo "FTP credentials not configured. Skipping FTP upload."
+            exit 0
+          fi
+
+          sudo apt-get update && sudo apt-get install -y lftp
+          lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
+          set ftp:ssl-allow no
+          set cmd:fail-exit yes
+          cd $FTP_BASE_DIR
+          put "${FILE}"
+          bye
+          EOF
+          echo "FTP upload completed: $FILE"
+
+      - name: Output Summary Report
+        run: |
+          STORE_NAME="${{ github.event.inputs.store }}"
+          BASE_URL="${{ needs.plan.outputs.base_url }}"
+          SITEMAP_URL="${{ needs.plan.outputs.sitemap_url }}"
+          OUTPUT_FILE="${{ steps.meta.outputs.name }}"
+          CHUNKS_MERGED="${{ steps.merge_csv.outputs.file_count || '0' }}"
+          TOTAL_PRODUCTS="${{ steps.merge_csv.outputs.final_rows || '0' }}"
+
+          echo "========================================="
+          echo "           SCRAPING SUMMARY"
+          echo "========================================="
+          echo "Store:           $STORE_NAME"
+          echo "Base URL:        $BASE_URL"
+          echo "Sitemap URL:     $SITEMAP_URL"
+          echo "Output File:     $OUTPUT_FILE"
+          echo "Chunks Merged:   $CHUNKS_MERGED"
+          echo "Total Products:  $TOTAL_PRODUCTS rows"
+          echo "FlareSolverr:    Enabled (Docker Service)"
+          echo "========================================="
+
+          if [ -f "products_full.csv" ]; then
+            echo ""
+            echo "Sample Rows (First 3):"
+            head -n 4 products_full.csv
+          fi
+
+      - name: Archive results
+        if: steps.merge_csv.outputs.final_rows > 0
+        uses: actions/upload-artifact@v4
+        with:
+          name: final_results
+          path: |
+            products_full.csv
+            ${{ steps.meta.outputs.name }}
+          retention-days: 7
