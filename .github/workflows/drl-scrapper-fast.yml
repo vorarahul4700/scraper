@@ -13,17 +13,10 @@ on:
           - "discount-living-rooms"
           - "dining-rooms-outlet"
           - "tv-stands-outlet"
-          - "custom"
         default: "all"
       chain_queue:
         description: "Internal queue of remaining stores in chain sequence (comma-separated)"
         required: false
-        default: ""
-      custom_url:
-        description: "Custom base site URL (only if store is 'custom')"
-        default: ""
-      custom_sitemap:
-        description: "Custom sitemap index URL (optional override)"
         default: ""
       total_sitemaps:
         description: "Total sitemaps to process (0 = auto/10)"
@@ -105,8 +98,6 @@ jobs:
         id: resolve_store
         run: |
           STORE="${{ steps.resolve_chain.outputs.current_store }}"
-          CUSTOM_URL="${{ github.event.inputs.custom_url }}"
-          CUSTOM_SITEMAP="${{ github.event.inputs.custom_sitemap }}"
 
           # Handle aliases: bfd/bdf and drl/dlr
           case "$STORE" in
@@ -130,24 +121,12 @@ jobs:
               SITEMAP_URL="https://www.tvstandsoutlet.com/sitemaps/sitemap_tvstands.xml"
               SITE_NAME="tvstandsoutlet"
               ;;
-            "custom")
-              BASE_URL="$CUSTOM_URL"
-              SITEMAP_URL="$CUSTOM_SITEMAP"
-              if [ -z "$SITEMAP_URL" ]; then
-                SITEMAP_URL="${BASE_URL%/}/sitemaps/sitemap.xml"
-              fi
-              SITE_NAME=$(echo "$BASE_URL" | sed -E 's|https?://||;s|www\.||;s|\.[a-zA-Z]+(/.*)?$||;s|/.*||')
-              ;;
             *)
               BASE_URL="https://www.bedroomfurniturediscounts.com"
               SITEMAP_URL="https://www.bedroomfurniturediscounts.com/sitemaps/sitemap.xml"
               SITE_NAME="bedroomfurniturediscounts"
               ;;
           esac
-
-          if [ -n "$CUSTOM_SITEMAP" ]; then
-            SITEMAP_URL="$CUSTOM_SITEMAP"
-          fi
 
           echo "base_url=$BASE_URL" >> $GITHUB_OUTPUT
           echo "sitemap_url=$SITEMAP_URL" >> $GITHUB_OUTPUT
