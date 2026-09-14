@@ -1,6 +1,0 @@
-scrapy
-pandas
-lxml
-requests
-beautifulsoup4
-curl_cffi
