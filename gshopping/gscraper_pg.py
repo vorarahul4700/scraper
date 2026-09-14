@@ -2585,7 +2585,7 @@ def setup_driver(max_attempts=3, base_delay=4, headless=False, use_free_proxies=
     proxy_manager = None
     if use_free_proxies or os.environ.get("USE_FREE_PROXIES", "").lower() == "true":
         try:
-            from colemanfurniture_scraper.utils.proxy_manager import ProxyManager
+            from colemanfurniture_brand_file_scraper.utils.proxy_manager import ProxyManager
             proxy_manager = ProxyManager()
             print("✓ Proxy rotation enabled via ProxyManager")
         except Exception as p_err:

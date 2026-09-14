@@ -75,7 +75,7 @@
         "name": "Emma Mason",
         "domain": "emmamason.com",
         "url": "https://www.emmamason.com",
-        "scraper": "drl/em_scraper.py",
+        "scraper": "drl/em_scraper_fast.py",
         "status": "partial",
         "notes": "html scarp with js variable dataLayer"
     },
@@ -147,7 +147,7 @@
         "name": "Dining Rooms Outlet",
         "domain": "diningroomsoutlet.com",
         "url": "https://www.diningroomsoutlet.com",
-        "scraper": "drl/dlr_scraper.py",
+        "scraper": "drl/drl_scraper_fast.py",
         "status": "done",
         "notes": "html scarp with js variable dataLayer"
     },
@@ -155,7 +155,7 @@
         "name": "Bedroom Furniture Discounts",
         "domain": "bedroomfurniturediscounts.com",
         "url": "https://www.bedroomfurniturediscounts.com",
-        "scraper": "drl/dlr_scraper.py",
+        "scraper": "drl/drl_scraper_fast.py",
         "status": "done",
         "notes": "html scarp with js variable dataLayer"
     },
@@ -163,7 +163,7 @@
         "name": "Discount Living Rooms",
         "domain": "discountlivingrooms.com",
         "url": "https://www.discountlivingrooms.com",
-        "scraper": "drl/dlr_scraper.py",
+        "scraper": "drl/drl_scraper_fast.py",
         "status": "done",
         "notes": "html scarp with js variable dataLayer"
     },
@@ -171,7 +171,7 @@
         "name": "TV Stands Outlet",
         "domain": "tvstandsoutlet.com",
         "url": "https://www.tvstandsoutlet.com",
-        "scraper": "drl/dlr_scraper.py",
+        "scraper": "drl/drl_scraper_fast.py",
         "status": "done",
         "notes": "html scarp with js variable dataLayer"
     },

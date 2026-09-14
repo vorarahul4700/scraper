@@ -48,7 +48,7 @@ WORKFLOWS = {
     "dlr": {
         "name": "Discount Living Rooms",
         "description": "Scrape product data from discountlivingrooms.com via dataLayer",
-        "script": "drl/dlr_scraper.py",
+        "script": "drl/drl_scraper_fast.py",
         "category": "DataLayer",
         "config_hint": "CURR_URL, SITEMAP_OFFSET, MAX_SITEMAPS, MAX_URLS_PER_SITEMAP, MAX_WORKERS",
         "default_env": {
@@ -63,7 +63,7 @@ WORKFLOWS = {
     "em_scraper": {
         "name": "Emma Mason (FlareSolverr)",
         "description": "Scrape Emma Mason product data via FlareSolverr with multi-endpoint support",
-        "script": "drl/em_scraper.py",
+        "script": "drl/em_scraper_fast.py",
         "category": "FlareSolverr",
         "config_hint": "CURR_URL, FLARESOLVERR_URL, SITEMAP_OFFSET, MAX_SITEMAPS, MAX_WORKERS",
         "default_env": {
@@ -74,15 +74,6 @@ WORKFLOWS = {
             "MAX_WORKERS": "10",
         },
         "color": "#45B7D1",
-    },
-    "em_algolia": {
-        "name": "Emma Mason Algolia",
-        "description": "Fetch Emma Mason products from Algolia search index",
-        "script": "drl/em_algolia_fetch.py",
-        "category": "API",
-        "config_hint": "--page, --hits-per-page, --max-workers, --output-csv",
-        "default_env": {},
-        "color": "#96CEB4",
     },
     "fpfc": {
         "name": "FurnitureCart / FurniturePick",
