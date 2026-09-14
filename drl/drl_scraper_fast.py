@@ -48,8 +48,6 @@ STORE_REGISTRY = {
 # Aliases for convenience
 STORE_ALIASES = {
     "bfd": "bedroom-furniture-discounts",
-    "bdf": "bedroom-furniture-discounts",
-    "drl": "discount-living-rooms",
     "dlr": "discount-living-rooms",
     "dro": "dining-rooms-outlet",
     "tvs": "tv-stands-outlet",

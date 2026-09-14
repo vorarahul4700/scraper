@@ -99,14 +99,14 @@ jobs:
         run: |
           STORE="${{ steps.resolve_chain.outputs.current_store }}"
 
-          # Handle aliases: bfd/bdf and drl/dlr
+          # Handle aliases: bfd and dlr
           case "$STORE" in
-            "bedroom-furniture-discounts"|"bfd"|"bdf")
+            "bedroom-furniture-discounts"|"bfd")
               BASE_URL="https://www.bedroomfurniturediscounts.com"
               SITEMAP_URL="https://www.bedroomfurniturediscounts.com/sitemaps/sitemap.xml"
               SITE_NAME="bedroomfurniturediscounts"
               ;;
-            "discount-living-rooms"|"drl"|"dlr")
+            "discount-living-rooms"|"dlr")
               BASE_URL="https://www.discountlivingrooms.com"
               SITEMAP_URL="https://www.discountlivingrooms.com/sitemaps/sitemap_discount.xml"
               SITE_NAME="discountlivingrooms"
