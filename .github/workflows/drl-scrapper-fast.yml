@@ -4,16 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       store:
-        description: "Choose store to scrape"
+        description: "Choose store to scrape (select 'all' to chain BFD -> DLR -> DRO -> TVS)"
         required: true
         type: choice
         options:
+          - "all"
           - "bedroom-furniture-discounts"
           - "discount-living-rooms"
           - "dining-rooms-outlet"
           - "tv-stands-outlet"
           - "custom"
-        default: "bedroom-furniture-discounts"
+        default: "all"
+      chain_queue:
+        description: "Internal queue of remaining stores in chain sequence (comma-separated)"
+        required: false
+        default: ""
       custom_url:
         description: "Custom base site URL (only if store is 'custom')"
         default: ""
@@ -42,39 +47,85 @@ on:
         description: "Delay between requests in seconds"
         default: "0.3"
 
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      current_store: ${{ steps.resolve_chain.outputs.current_store }}
+      next_store: ${{ steps.resolve_chain.outputs.next_store }}
+      remaining_queue: ${{ steps.resolve_chain.outputs.remaining_queue }}
       site_name: ${{ steps.resolve_store.outputs.site_name }}
       base_url: ${{ steps.resolve_store.outputs.base_url }}
       sitemap_url: ${{ steps.resolve_store.outputs.sitemap_url }}
     steps:
-      - name: Resolve Store Configuration
+      - name: Resolve Store and Chaining Sequence
+        id: resolve_chain
+        run: |
+          RAW_STORE="${{ github.event.inputs.store }}"
+          CHAIN_QUEUE="${{ github.event.inputs.chain_queue }}"
+
+          echo "Input store:       $RAW_STORE"
+          echo "Input chain_queue: $CHAIN_QUEUE"
+
+          # Canonical mapping: BFD -> DLR -> DRO -> TVS
+          if [ "$RAW_STORE" = "all" ]; then
+            CURRENT_STORE="bedroom-furniture-discounts"
+            NEXT_STORE="discount-living-rooms"
+            REMAINING_QUEUE="dining-rooms-outlet,tv-stands-outlet"
+          elif [ -n "$CHAIN_QUEUE" ]; then
+            CURRENT_STORE="$RAW_STORE"
+            NEXT_STORE=$(echo "$CHAIN_QUEUE" | cut -d',' -f1 | tr -d ' ')
+            if echo "$CHAIN_QUEUE" | grep -q ","; then
+              REMAINING_QUEUE=$(echo "$CHAIN_QUEUE" | cut -d',' -f2- | tr -d ' ')
+            else
+              REMAINING_QUEUE=""
+            fi
+          else
+            CURRENT_STORE="$RAW_STORE"
+            NEXT_STORE=""
+            REMAINING_QUEUE=""
+          fi
+
+          echo "current_store=$CURRENT_STORE" >> $GITHUB_OUTPUT
+          echo "next_store=$NEXT_STORE" >> $GITHUB_OUTPUT
+          echo "remaining_queue=$REMAINING_QUEUE" >> $GITHUB_OUTPUT
+
+          echo "========================================="
+          echo "Current Store to Scrape: $CURRENT_STORE"
+          echo "Next Store in Chain:     $NEXT_STORE"
+          echo "Remaining in Queue:      $REMAINING_QUEUE"
+          echo "========================================="
+
+      - name: Resolve Store URLs & Configuration
         id: resolve_store
         run: |
-          STORE="${{ github.event.inputs.store }}"
+          STORE="${{ steps.resolve_chain.outputs.current_store }}"
           CUSTOM_URL="${{ github.event.inputs.custom_url }}"
           CUSTOM_SITEMAP="${{ github.event.inputs.custom_sitemap }}"
 
+          # Handle aliases: bfd/bdf and drl/dlr
           case "$STORE" in
-            "bedroom-furniture-discounts")
+            "bedroom-furniture-discounts"|"bfd"|"bdf")
               BASE_URL="https://www.bedroomfurniturediscounts.com"
               SITEMAP_URL="https://www.bedroomfurniturediscounts.com/sitemaps/sitemap.xml"
               SITE_NAME="bedroomfurniturediscounts"
               ;;
-            "discount-living-rooms")
+            "discount-living-rooms"|"drl"|"dlr")
               BASE_URL="https://www.discountlivingrooms.com"
               SITEMAP_URL="https://www.discountlivingrooms.com/sitemaps/sitemap_discount.xml"
               SITE_NAME="discountlivingrooms"
               ;;
-            "dining-rooms-outlet")
+            "dining-rooms-outlet"|"dro")
               BASE_URL="https://www.diningroomsoutlet.com"
               SITEMAP_URL="https://www.diningroomsoutlet.com/sitemaps/sitemap_diningrooms.xml"
               SITE_NAME="diningroomsoutlet"
               ;;
-            "tv-stands-outlet")
+            "tv-stands-outlet"|"tvs")
               BASE_URL="https://www.tvstandsoutlet.com"
               SITEMAP_URL="https://www.tvstandsoutlet.com/sitemaps/sitemap_tvstands.xml"
               SITE_NAME="tvstandsoutlet"
@@ -87,6 +138,11 @@ jobs:
               fi
               SITE_NAME=$(echo "$BASE_URL" | sed -E 's|https?://||;s|www\.||;s|\.[a-zA-Z]+(/.*)?$||;s|/.*||')
               ;;
+            *)
+              BASE_URL="https://www.bedroomfurniturediscounts.com"
+              SITEMAP_URL="https://www.bedroomfurniturediscounts.com/sitemaps/sitemap.xml"
+              SITE_NAME="bedroomfurniturediscounts"
+              ;;
           esac
 
           if [ -n "$CUSTOM_SITEMAP" ]; then
@@ -98,7 +154,6 @@ jobs:
           echo "site_name=$SITE_NAME" >> $GITHUB_OUTPUT
 
           echo "========================================="
-          echo "Resolved Store: $STORE"
           echo "Base URL:       $BASE_URL"
           echo "Sitemap URL:    $SITEMAP_URL"
           echo "Site Name:      $SITE_NAME"
@@ -194,7 +249,7 @@ jobs:
 
       - name: Run FlareSolverr scraper
         env:
-          TARGET_STORE: ${{ github.event.inputs.store }}
+          TARGET_STORE: ${{ needs.plan.outputs.current_store }}
           CURR_URL: ${{ matrix.url }}
           SITEMAP_INDEX: ${{ matrix.sitemap }}
           SITEMAP_OFFSET: ${{ matrix.offset }}
@@ -205,7 +260,7 @@ jobs:
           FLARESOLVERR_URL: http://localhost:8191/v1
         run: |
           echo "Starting fast scraper job:"
-          echo "Store:          ${{ github.event.inputs.store }}"
+          echo "Store:          ${{ needs.plan.outputs.current_store }}"
           echo "CURR_URL:       $CURR_URL"
           echo "SITEMAP_INDEX:  $SITEMAP_INDEX"
           echo "SITEMAP_OFFSET: $SITEMAP_OFFSET"
@@ -265,7 +320,6 @@ jobs:
           CSV_FILES=$(find chunks -name "products_chunk_*.csv")
           FIRST_FILE=$(echo "$CSV_FILES" | head -n 1)
 
-          # Extract header from first chunk
           head -n 1 "$FIRST_FILE" > products_full.csv
 
           FILE_COUNT=0
@@ -324,23 +378,24 @@ jobs:
 
       - name: Output Summary Report
         run: |
-          STORE_NAME="${{ github.event.inputs.store }}"
+          STORE_NAME="${{ needs.plan.outputs.current_store }}"
           BASE_URL="${{ needs.plan.outputs.base_url }}"
           SITEMAP_URL="${{ needs.plan.outputs.sitemap_url }}"
           OUTPUT_FILE="${{ steps.meta.outputs.name }}"
           CHUNKS_MERGED="${{ steps.merge_csv.outputs.file_count || '0' }}"
           TOTAL_PRODUCTS="${{ steps.merge_csv.outputs.final_rows || '0' }}"
+          NEXT_STORE="${{ needs.plan.outputs.next_store }}"
 
           echo "========================================="
           echo "           SCRAPING SUMMARY"
           echo "========================================="
-          echo "Store:           $STORE_NAME"
+          echo "Completed Store: $STORE_NAME"
           echo "Base URL:        $BASE_URL"
           echo "Sitemap URL:     $SITEMAP_URL"
           echo "Output File:     $OUTPUT_FILE"
           echo "Chunks Merged:   $CHUNKS_MERGED"
           echo "Total Products:  $TOTAL_PRODUCTS rows"
-          echo "FlareSolverr:    Enabled (Docker Service)"
+          echo "Next in Chain:   ${NEXT_STORE:-'None (Chain Complete)'}"
           echo "========================================="
 
           if [ -f "products_full.csv" ]; then
@@ -353,8 +408,43 @@ jobs:
         if: steps.merge_csv.outputs.final_rows > 0
         uses: actions/upload-artifact@v4
         with:
-          name: final_results
+          name: ${{ steps.meta.outputs.name }}
           path: |
             products_full.csv
             ${{ steps.meta.outputs.name }}
           retention-days: 7
+
+  trigger_next_store:
+    needs: [plan, merge]
+    runs-on: ubuntu-latest
+    if: always() && !cancelled() && needs.plan.outputs.next_store != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trigger next store in chain via workflow_dispatch
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          NEXT_STORE="${{ needs.plan.outputs.next_store }}"
+          REMAINING_QUEUE="${{ needs.plan.outputs.remaining_queue }}"
+
+          echo "========================================="
+          echo "Chaining to Next Store in Sequence"
+          echo "Next Store:      $NEXT_STORE"
+          echo "Remaining Queue: $REMAINING_QUEUE"
+          echo "========================================="
+
+          gh workflow run drl-scrapper-fast.yml \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}" \
+            --field store="$NEXT_STORE" \
+            --field chain_queue="$REMAINING_QUEUE" \
+            --field total_sitemaps="${{ github.event.inputs.total_sitemaps }}" \
+            --field sitemaps_per_job="${{ github.event.inputs.sitemaps_per_job }}" \
+            --field specific_offsets="${{ github.event.inputs.specific_offsets }}" \
+            --field max_parallel_jobs="${{ github.event.inputs.max_parallel_jobs }}" \
+            --field urls_per_sitemap="${{ github.event.inputs.urls_per_sitemap }}" \
+            --field max_workers="${{ github.event.inputs.max_workers }}" \
+            --field request_delay="${{ github.event.inputs.request_delay }}"
+
+          echo "✓ Successfully triggered workflow for $NEXT_STORE!"
