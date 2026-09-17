@@ -147,10 +147,22 @@ class RequestManager:
         self.retry_delays = [1, 2, 4, 8, 16]  # Exponential backoff
         self.request_count = 0
         self.last_request_time = 0
+        self.rate_limit_until = 0  # Global timestamp for synchronized thread backoff
+        self.lock = threading.Lock()
         
     def _respect_rate_limit(self, crawl_delay=None):
-        """Add minimal delay between requests"""
+        """Add minimal delay between requests & enforce shared rate-limit cooldown across all threads"""
         current_time = time.time()
+        
+        # Check if a global rate limit pause is active
+        with self.lock:
+            pause_needed = self.rate_limit_until - current_time
+
+        if pause_needed > 0:
+            log(f"Global rate-limit active: pausing thread for {pause_needed:.1f}s...")
+            time.sleep(pause_needed)
+            current_time = time.time()
+
         if self.request_count > 0:
             elapsed = current_time - self.last_request_time
             base_delay = crawl_delay if crawl_delay else REQUEST_DELAY_BASE
@@ -193,7 +205,7 @@ class RequestManager:
             return None, 0
     
     def fetch(self, url: str, retry_count: int = 0, crawl_delay=None, json_mode: bool = False) -> Optional[str]:
-        """Intelligent fetching with fast retry strategies"""
+        """Intelligent fetching with synchronized thread backoff"""
         if retry_count >= len(self.retry_delays):
             log(f"Max retries exceeded for {url}")
             return None
@@ -216,15 +228,23 @@ class RequestManager:
         if content:
             return content
         
-        # Fast retry backoff
+        # Synchronized retry backoff across all threads
         if status == 429:
-            delay = random.uniform(2.0, 4.0)
-            log(f"HTTP 429 for {url}, retrying in {delay:.1f}s (retry {retry_count+1})")
+            delay = random.uniform(10.0, 20.0)
+            with self.lock:
+                new_until = time.time() + delay
+                if new_until > self.rate_limit_until:
+                    self.rate_limit_until = new_until
+                    log(f"HTTP 429 encountered for {url}! Setting global cooldown of {delay:.1f}s for all threads.")
             time.sleep(delay)
             return self.fetch(url, retry_count + 1, crawl_delay, json_mode)
         elif status in [403, 503]:
-            delay = random.uniform(1.0, 3.0)
-            log(f"HTTP {status} for {url}, retrying in {delay:.1f}s (retry {retry_count+1})")
+            delay = random.uniform(5.0, 10.0)
+            with self.lock:
+                new_until = time.time() + delay
+                if new_until > self.rate_limit_until:
+                    self.rate_limit_until = new_until
+                    log(f"HTTP {status} encountered for {url}! Setting global cooldown of {delay:.1f}s for all threads.")
             time.sleep(delay)
             return self.fetch(url, retry_count + 1, crawl_delay, json_mode)
         elif status == 404:
@@ -232,12 +252,10 @@ class RequestManager:
             return None
         
         if status != 200:
-            delay = random.uniform(1.0, 2.0)
+            delay = random.uniform(2.0, 5.0)
             log(f"Retry {retry_count+1} for {url} in {delay:.1f}s")
             time.sleep(delay)
             return self.fetch(url, retry_count + 1, crawl_delay)
-        
-        return None
         
         return None
 
