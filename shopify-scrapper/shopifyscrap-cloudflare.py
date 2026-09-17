@@ -92,7 +92,7 @@ class RequestManager:
         if self.request_count % 20 == 0:
             long_pause = random.uniform(8, 15)
             log(f"Taking longer pause after {self.request_count} requests: {long_pause:.1f}s")
-            time.sleep(long_pelay)
+            time.sleep(long_pause)
     
     def _fetch_with_cloudscraper(self, url: str, crawl_delay=None) -> Optional[Tuple[str, int]]:
         """Use cloudscraper for Cloudflare-protected pages"""
@@ -199,45 +199,82 @@ def normalize_image(url: str) -> str:
 
 csv_lock = threading.Lock()
 
-def extract_category(tags: list):
+def extract_category(tags):
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+    elif not isinstance(tags, list):
+        tags = []
     for t in tags:
         if t.startswith("collection_"):
             return t.replace("collection_", ""), ""
     return "", ""
+
+def get_main_image(product: dict) -> str:
+    img = product.get("image")
+    if isinstance(img, dict) and img.get("src"):
+        return normalize_image(img.get("src"))
+    images = product.get("images")
+    if isinstance(images, list) and len(images) > 0 and isinstance(images[0], dict) and images[0].get("src"):
+        return normalize_image(images[0].get("src"))
+    featured = product.get("featured_image")
+    if isinstance(featured, str):
+        return normalize_image(featured)
+    elif isinstance(featured, dict) and featured.get("src"):
+        return normalize_image(featured.get("src"))
+    return ""
 
 def process_product(url: str, writer, seen: set, crawl_delay=None):
     if url in seen:
         return
     seen.add(url)
     
-    product_url = url.rstrip("/") + ".js"
-    product = fetch_json(product_url, crawl_delay)
+    product_url = url.rstrip("/") + ".json"
+    data = fetch_json(product_url, crawl_delay)
     
-    if not product:
+    if not data:
         log(f"Failed to fetch product: {product_url}")
         return
         
-    if not product.get("variants"):
+    if isinstance(data, dict) and "product" in data:
+        product = data["product"]
+    else:
+        product = data
+
+    if not isinstance(product, dict) or not product.get("variants"):
         log(f"No variants for product: {product_url}")
         return
 
     tags = product.get("tags", [])
     category, category_url = extract_category(tags)
     if not category:
-        category = product.get("type", "")
+        category = product.get("product_type") or product.get("type", "")
     
     brand = product.get("vendor", "")
     product_name = product.get("title", "")
     product_id = product.get("id", "")
-    main_image = normalize_image(product.get("featured_image"))
-    product_page_url = f"{CURR_URL}{product.get('url', '')}"
+    main_image = get_main_image(product)
+    
+    handle = product.get("handle", "")
+    if handle:
+        product_page_url = f"{CURR_URL}/products/{handle}"
+    else:
+        product_page_url = f"{CURR_URL}{product.get('url', '')}"
 
     variants_processed = 0
     for v in product["variants"]:
+        available = v.get("available")
+        if available is None:
+            iq = v.get("inventory_quantity")
+            if iq is not None:
+                available = iq > 0
+            else:
+                available = True
+
         row = [
             f"{product_page_url}?variant={v.get('id', '')}",  # Ref Product URL
             product_id,                         # Ref Product ID
             v.get("id", ""),                    # Ref Variant ID
+            v.get("title", ""),                 # Ref Variant Title
             category,                           # Ref Category
             category_url,                       # Ref Category URL
             brand,                              # Ref Brand Name
@@ -247,10 +284,10 @@ def process_product(url: str, writer, seen: set, crawl_delay=None):
             v.get("barcode", ""),               # Ref GTIN
             v.get("price", ""),                 # Ref Price
             main_image,                         # Ref Main Image
-            1 if v.get("available") else 0,     # Ref Quantity
-            v.get("option1", ""),               # Ref Group Attr 1
-            v.get("option2", ""),               # Ref Group Attr 2
-            "active" if v.get("available") else "inactive",  # Ref Status
+            1 if available else 0,              # Ref Quantity
+            v.get("option1", "") or "",          # Ref Group Attr 1
+            v.get("option2", "") or "",          # Ref Group Attr 2
+            "active" if available else "inactive",  # Ref Status
             SCRAPED_DATE                        # Date Scraped
         ]
 
@@ -375,6 +412,7 @@ def main():
             "Ref Product URL",
             "Ref Product ID",
             "Ref Variant ID",
+            "Ref Variant Title",
             "Ref Category",
             "Ref Category URL",
             "Ref Brand Name",

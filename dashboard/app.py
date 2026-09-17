@@ -140,9 +140,9 @@ WORKFLOWS = {
         "default_env": {},
         "color": "#8E44AD",
     },
-    "shopify_cf": {
-        "name": "Shopify (Cloudflare)",
-        "description": "Scrape Shopify stores protected by Cloudflare using cloudscraper + curl_cffi",
+    "shopify": {
+        "name": "Shopify Scraper",
+        "description": "Scrape Shopify stores using cloudscraper + curl_cffi",
         "script": "shopify-scrapper/shopifyscrap-cloudflare.py",
         "category": "Cloudflare",
         "config_hint": "CURR_URL, SITEMAP_OFFSET, MAX_SITEMAPS, MAX_URLS_PER_SITEMAP",
@@ -154,21 +154,6 @@ WORKFLOWS = {
             "MAX_WORKERS": "4",
         },
         "color": "#1ABC9C",
-    },
-    "shopify_normal": {
-        "name": "Shopify (Normal)",
-        "description": "Scrape standard Shopify stores via .js product endpoint",
-        "script": "shopify-scrapper/shopifyscrap-normal.py",
-        "category": "HTTP",
-        "config_hint": "CURR_URL, SITEMAP_OFFSET, MAX_SITEMAPS, MAX_URLS_PER_SITEMAP",
-        "default_env": {
-            "CURR_URL": "",
-            "SITEMAP_OFFSET": "0",
-            "MAX_SITEMAPS": "0",
-            "MAX_URLS_PER_SITEMAP": "0",
-            "MAX_WORKERS": "8",
-        },
-        "color": "#2ECC71",
     },
 }
 

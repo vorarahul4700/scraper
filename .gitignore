@@ -12,3 +12,14 @@ __pycache__/
 .vscode/
 config/accounts_config.json
 scratch/
+.forge/
+.serena/
+.venv/
+dashboard/static/dashboard.js
+scraping-view/
+scripts/ingest_github_artifacts.py
+scripts/ingest_github_artifacts_fast.py
+scripts/init_dashboard_db.py
+skills-lock.json
+test/
+utils/
