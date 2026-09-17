@@ -4,9 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       store:
-        description: "Store to scrape (all, afa-stores, english-elm, grayson-living, france-and-son, grayson-luxury)"
+        description: "Choose store to scrape (select 'all' to chain AFA -> EE -> GL -> FAS -> GLX)"
         required: true
-        type: string
+        type: choice
+        options:
+          - "all"
+          - "afa-stores"
+          - "english-elm"
+          - "grayson-living"
+          - "france-and-son"
+          - "grayson-luxury"
         default: "all"
       total_sitemaps:
         description: "Total sitemaps to process (0 = auto)"
@@ -58,23 +65,19 @@ jobs:
 
           if [ "$RAW_STORE" = "all" ]; then
             CURRENT_STORE="${SEQUENCE[0]}"
-            NEXT_STORE="chain:${SEQUENCE[1]}"
-          elif [[ "$RAW_STORE" == chain:* ]]; then
-            TARGET_NAME="${RAW_STORE#chain:}"
-            CURRENT_STORE="$TARGET_NAME"
+            NEXT_STORE="${SEQUENCE[1]}"
+          else
+            CURRENT_STORE="$RAW_STORE"
             NEXT_STORE=""
             for ((i=0; i<${#SEQUENCE[@]}; i++)); do
-              if [ "${SEQUENCE[$i]}" = "$TARGET_NAME" ]; then
+              if [ "${SEQUENCE[$i]}" = "$RAW_STORE" ]; then
                 NEXT_IDX=$((i + 1))
                 if [ $NEXT_IDX -lt ${#SEQUENCE[@]} ]; then
-                  NEXT_STORE="chain:${SEQUENCE[$NEXT_IDX]}"
+                  NEXT_STORE="${SEQUENCE[$NEXT_IDX]}"
                 fi
                 break
               fi
             done
-          else
-            CURRENT_STORE="$RAW_STORE"
-            NEXT_STORE=""
           fi
 
           echo "current_store=$CURRENT_STORE" >> $GITHUB_OUTPUT
@@ -359,6 +362,7 @@ jobs:
           lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
           set ftp:ssl-allow no
           set cmd:fail-exit yes
+          mkdir -p $FTP_BASE_DIR
           cd $FTP_BASE_DIR
           put "${FILE}"
           bye
