@@ -151,29 +151,28 @@ class RequestManager:
         self.lock = threading.Lock()
         
     def _respect_rate_limit(self, crawl_delay=None):
-        """Add minimal delay between requests & enforce shared rate-limit cooldown across all threads"""
-        current_time = time.time()
-        
-        # Check if a global rate limit pause is active
+        """Enforce strict thread-safe minimum inter-request spacing across ALL threads"""
         with self.lock:
-            pause_needed = self.rate_limit_until - current_time
-
-        if pause_needed > 0:
-            log(f"Global rate-limit active: pausing thread for {pause_needed:.1f}s...")
-            time.sleep(pause_needed)
             current_time = time.time()
-
-        if self.request_count > 0:
-            elapsed = current_time - self.last_request_time
+            
+            # Check global rate-limit cooldown
+            if current_time < self.rate_limit_until:
+                pause_needed = self.rate_limit_until - current_time
+                time.sleep(pause_needed)
+                current_time = time.time()
+            
+            # Enforce hard minimum gap between consecutive requests
             base_delay = crawl_delay if crawl_delay else REQUEST_DELAY_BASE
-            target_delay = random.uniform(base_delay * 0.8, base_delay * 1.2)
+            target_delay = random.uniform(base_delay * 0.9, base_delay * 1.3)
+            elapsed = current_time - self.last_request_time
             
             if elapsed < target_delay:
-                sleep_time = target_delay - elapsed
-                time.sleep(sleep_time)
-        
-        self.last_request_time = time.time()
-        self.request_count += 1
+                sleep_needed = target_delay - elapsed
+                time.sleep(sleep_needed)
+                current_time = time.time()
+            
+            self.last_request_time = current_time
+            self.request_count += 1
     
     def _fetch_with_cloudscraper(self, url: str, crawl_delay=None) -> Optional[Tuple[str, int]]:
         """Use cloudscraper for Cloudflare-protected pages"""
@@ -205,7 +204,7 @@ class RequestManager:
             return None, 0
     
     def fetch(self, url: str, retry_count: int = 0, crawl_delay=None, json_mode: bool = False) -> Optional[str]:
-        """Intelligent fetching with synchronized thread backoff"""
+        """Intelligent fetching with staggered thread retries"""
         if retry_count >= len(self.retry_delays):
             log(f"Max retries exceeded for {url}")
             return None
@@ -228,31 +227,26 @@ class RequestManager:
         if content:
             return content
         
-        # Synchronized retry backoff across all threads
-        if status == 429:
-            delay = random.uniform(3.0, 5.0)
+        # Synchronized retry backoff with staggered thread jitter
+        if status in [429, 403, 503]:
+            base_cooldown = 4.0 if status == 429 else 2.5
+            staggered_jitter = random.uniform(0.5, 2.0) * (retry_count + 1)
+            total_sleep = base_cooldown + staggered_jitter
+            
             with self.lock:
-                new_until = time.time() + delay
-                if new_until > self.rate_limit_until:
-                    self.rate_limit_until = new_until
-                    log(f"HTTP 429 encountered for {url}! Setting global cooldown of {delay:.1f}s for all threads.")
-            time.sleep(delay)
-            return self.fetch(url, retry_count + 1, crawl_delay, json_mode)
-        elif status in [403, 503]:
-            delay = random.uniform(2.0, 4.0)
-            with self.lock:
-                new_until = time.time() + delay
-                if new_until > self.rate_limit_until:
-                    self.rate_limit_until = new_until
-                    log(f"HTTP {status} encountered for {url}! Setting global cooldown of {delay:.1f}s for all threads.")
-            time.sleep(delay)
+                now = time.time()
+                if now + base_cooldown > self.rate_limit_until:
+                    self.rate_limit_until = now + base_cooldown
+                    log(f"HTTP {status} for {url}! Cooldown active for {base_cooldown:.1f}s.")
+            
+            time.sleep(total_sleep)
             return self.fetch(url, retry_count + 1, crawl_delay, json_mode)
         elif status == 404:
             log(f"URL not found: {url}")
             return None
         
         if status != 200:
-            delay = random.uniform(2.0, 5.0)
+            delay = random.uniform(1.5, 3.0)
             log(f"Retry {retry_count+1} for {url} in {delay:.1f}s")
             time.sleep(delay)
             return self.fetch(url, retry_count + 1, crawl_delay)
