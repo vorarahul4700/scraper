@@ -22,7 +22,7 @@ MAX_URLS_PER_SITEMAP = int(os.getenv("MAX_URLS_PER_SITEMAP", "0"))
 
 # Reduced workers to avoid detection
 MAX_WORKERS = min(int(os.getenv("MAX_WORKERS", "4")), 6)  # Max 6 workers
-REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY", "1.0"))
+REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY_BASE", os.getenv("REQUEST_DELAY", "1.0")))
 
 SITEMAP_INDEX = f"{CURR_URL}/sitemap.xml"
 OUTPUT_CSV = f"products_chunk_{SITEMAP_OFFSET}.csv"
@@ -372,36 +372,59 @@ def main():
     else:
         log(f"Using default request delay: {REQUEST_DELAY_BASE} seconds")
     
-    # Load sitemap index
-    log(f"Loading sitemap index: {sitemap_index}")
-    index = load_xml(sitemap_index, crawl_delay)
+    # Load sitemap index — try multiple sitemap locations
+    SITEMAP_CANDIDATES = [
+        sitemap_index,
+        f"{CURR_URL}/sitemap_index.xml",
+        f"{CURR_URL}/sitemaps/sitemap.xml",
+        f"{CURR_URL}/sitemap/sitemap.xml",
+    ]
+    
+    index = None
+    for candidate in SITEMAP_CANDIDATES:
+        log(f"Trying sitemap: {candidate}")
+        index = load_xml(candidate, crawl_delay)
+        if index is not None:
+            log(f"Successfully loaded sitemap: {candidate}")
+            break
+        log(f"Failed to load: {candidate}")
+    
     if not index:
-        log("Failed to load sitemap index")
-        sys.exit(1)
+        log("ERROR: Could not load sitemap index from any known location. Site may be blocking requests.")
+        log("Exiting without failure to allow merge job to run.")
+        sys.exit(0)
     
     ns = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
     sitemaps = [e.text for e in index.findall(".//ns:sitemap/ns:loc", ns)]
     
+    # Flat sitemap detection
+    flat_product_urls = []
     if not sitemaps:
         # Try alternative namespace
         sitemaps = [e.text for e in index.findall(".//sitemap/loc")]
-        if not sitemaps:
-            # Try without namespace as last resort
-            sitemaps = [e.text for e in index.findall(".//loc")]
+    if not sitemaps:
+        # Flat sitemap: all <loc> entries are product URLs directly
+        flat_product_urls = [e.text for e in index.findall(".//loc")]
+        if flat_product_urls:
+            log(f"Flat sitemap detected: {len(flat_product_urls)} product URLs found directly")
+        else:
+            log("No sitemaps or product URLs found in sitemap index. Exiting.")
+            sys.exit(0)
     
     log(f"Total sitemaps found: {len(sitemaps)}")
     
-    # Apply offset and limit
-    if MAX_SITEMAPS > 0:
-        sitemaps = sitemaps[SITEMAP_OFFSET:SITEMAP_OFFSET + MAX_SITEMAPS]
-    elif SITEMAP_OFFSET > 0:
-        sitemaps = sitemaps[SITEMAP_OFFSET:]
-    
-    log(f"Sitemaps to process in this chunk: {len(sitemaps)}")
-    
-    if not sitemaps:
-        log("No sitemaps to process")
-        sys.exit(0)
+    # Apply offset and limit (only for indexed sitemaps)
+    if sitemaps:
+        if MAX_SITEMAPS > 0:
+            sitemaps = sitemaps[SITEMAP_OFFSET:SITEMAP_OFFSET + MAX_SITEMAPS]
+        elif SITEMAP_OFFSET > 0:
+            sitemaps = sitemaps[SITEMAP_OFFSET:]
+        
+        log(f"Sitemaps to process in this chunk: {len(sitemaps)}")
+        
+        if not sitemaps:
+            log("No sitemaps to process in this chunk")
+            sys.exit(0)
     
     # Create output file
     with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
@@ -432,29 +455,14 @@ def main():
         seen = set()
         total_products = 0
         
-        # Process sitemaps
-        for sitemap_idx, sitemap_url in enumerate(sitemaps):
-            log(f"[{sitemap_idx+1}/{len(sitemaps)}] Loading sitemap: {sitemap_url}")
-            
-            xml = load_xml(sitemap_url, crawl_delay)
-            if not xml:
-                log(f"  Failed to load sitemap, skipping")
-                continue
-            
-            # Extract URLs
-            urls = [e.text for e in xml.findall(".//ns:url/ns:loc", ns)]
-            if not urls:
-                urls = [e.text for e in xml.findall(".//url/loc")]
-            if not urls:
-                urls = [e.text for e in xml.findall(".//loc")]
-            
-            log(f"  Found {len(urls)} URLs in sitemap")
-            
+        def process_url_list(urls, label=""):
+            nonlocal total_products
             if MAX_URLS_PER_SITEMAP and len(urls) > MAX_URLS_PER_SITEMAP:
                 urls = urls[:MAX_URLS_PER_SITEMAP]
                 log(f"  Limited to {len(urls)} URLs")
             
-            # Process URLs with ThreadPoolExecutor
+            log(f"  Processing {len(urls)} URLs{' in ' + label if label else ''}")
+            
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 futures = []
                 for url in urls:
@@ -464,27 +472,49 @@ def main():
                     elif url:
                         log(f"  Skipping URL not from current domain: {url}")
                 
-                # Monitor progress
                 completed = 0
                 for future in as_completed(futures):
                     completed += 1
                     if completed % 5 == 0:
-                        log(f"  Processed {completed}/{len(futures)} URLs in this sitemap")
+                        log(f"  Processed {completed}/{len(futures)} URLs")
                     try:
                         future.result()
                     except Exception as e:
                         log(f"  Error processing URL: {e}")
             
             total_products += len(urls)
-            
-            # Longer pause between sitemaps
-            if sitemap_idx < len(sitemaps) - 1:
-                base_pause = crawl_delay * 5 if crawl_delay else 10
-                pause = random.uniform(base_pause * 0.8, base_pause * 1.2)
-                log(f"  Pausing {pause:.1f}s before next sitemap...")
-                time.sleep(pause)
-            
-            gc.collect()
+        
+        # Handle flat sitemap (product URLs directly in sitemap)
+        if flat_product_urls:
+            process_url_list(flat_product_urls, "flat sitemap")
+        else:
+            # Process indexed sitemaps
+            for sitemap_idx, sitemap_url in enumerate(sitemaps):
+                log(f"[{sitemap_idx+1}/{len(sitemaps)}] Loading sitemap: {sitemap_url}")
+                
+                xml = load_xml(sitemap_url, crawl_delay)
+                if not xml:
+                    log(f"  Failed to load sitemap, skipping")
+                    continue
+                
+                # Extract URLs
+                urls = [e.text for e in xml.findall(".//ns:url/ns:loc", ns)]
+                if not urls:
+                    urls = [e.text for e in xml.findall(".//url/loc")]
+                if not urls:
+                    urls = [e.text for e in xml.findall(".//loc")]
+                
+                log(f"  Found {len(urls)} URLs in sitemap")
+                process_url_list(urls, f"sitemap {sitemap_idx+1}")
+                
+                # Longer pause between sitemaps
+                if sitemap_idx < len(sitemaps) - 1:
+                    base_pause = crawl_delay * 5 if crawl_delay else 10
+                    pause = random.uniform(base_pause * 0.8, base_pause * 1.2)
+                    log(f"  Pausing {pause:.1f}s before next sitemap...")
+                    time.sleep(pause)
+                
+                gc.collect()
     
     log(f"Chunk completed: {OUTPUT_CSV}")
     log(f"Total unique products processed: {len(seen)}")
