@@ -164,11 +164,17 @@ class RequestManager:
             return content
         
         # Handle specific status codes
-        if status in [403, 429, 503]:
-            delay = self.retry_delays[retry_count] + random.uniform(0, 1)
+        if status == 429:
+            # 429 = Too Many Requests — use aggressive backoff
+            delay = self.retry_delays[retry_count] * 10 + random.uniform(5, 30)
+            log(f"HTTP 429 Too Many Requests for {url}, waiting {delay:.1f}s before retry {retry_count+1}")
+            time.sleep(delay)
+            return self.fetch(url, retry_count + 1, crawl_delay, json_mode)
+        elif status in [403, 503]:
+            delay = self.retry_delays[retry_count] * 5 + random.uniform(2, 10)
             log(f"HTTP {status} for {url}, retry {retry_count+1} in {delay:.1f}s")
             time.sleep(delay)
-            return self.fetch(url, retry_count + 1, crawl_delay)
+            return self.fetch(url, retry_count + 1, crawl_delay, json_mode)
         elif status == 404:
             log(f"URL not found: {url}")
             return None
@@ -247,7 +253,13 @@ def process_product(url: str, writer, seen: set, crawl_delay=None):
         return
     seen.add(url)
     
-    product_url = url.rstrip("/") + ".json"
+    # Guard: only process URLs that are actual product pages
+    clean_url = url.rstrip("/")
+    if "/products/" not in clean_url:
+        log(f"Skipping non-product URL: {url}")
+        return
+    
+    product_url = clean_url + ".json"
     data = fetch_json(product_url, crawl_delay)
     
     if not data:
@@ -280,6 +292,7 @@ def process_product(url: str, writer, seen: set, crawl_delay=None):
         product_page_url = f"{CURR_URL}{product.get('url', '')}"
 
     variants_processed = 0
+    raw_json_str = json.dumps(data, ensure_ascii=False)  # Full raw JSON for the row
     for v in product["variants"]:
         available = v.get("available")
         if available is None:
@@ -307,7 +320,8 @@ def process_product(url: str, writer, seen: set, crawl_delay=None):
             v.get("option1", "") or "",          # Ref Group Attr 1
             v.get("option2", "") or "",          # Ref Group Attr 2
             "active" if available else "inactive",  # Ref Status
-            SCRAPED_DATE                        # Date Scraped
+            SCRAPED_DATE,                       # Date Scraped
+            raw_json_str,                       # Raw JSON
         ]
 
         with csv_lock:
@@ -485,7 +499,8 @@ def main():
             "Ref Group Attr 1",
             "Ref Group Attr 2",
             "Ref Status",
-            "Date Scraped"
+            "Date Scraped",
+            "Raw JSON",
         ])
         
         seen = set()
