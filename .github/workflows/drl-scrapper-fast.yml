@@ -4,15 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       store:
-        description: "Choose store to scrape (select 'all' to chain BFD -> DLR -> DRO -> TVS)"
+        description: "Store to scrape (all, bedroom-furniture-discounts, discount-living-rooms, dining-rooms-outlet, tv-stands-outlet)"
         required: true
-        type: choice
-        options:
-          - "all"
-          - "bedroom-furniture-discounts"
-          - "discount-living-rooms"
-          - "dining-rooms-outlet"
-          - "tv-stands-outlet"
+        type: string
         default: "all"
       total_sitemaps:
         description: "Total sitemaps to process (0 = auto/10)"
@@ -327,6 +321,7 @@ jobs:
 
       - name: Upload to FTP (if configured)
         if: steps.merge_csv.outputs.final_rows > 0
+        continue-on-error: true
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USER }}

@@ -4,16 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       store:
-        description: "Choose store to scrape (select 'all' to chain AFA -> EE -> GL -> FAS -> GLX)"
+        description: "Store to scrape (all, afa-stores, english-elm, grayson-living, france-and-son, grayson-luxury)"
         required: true
-        type: choice
-        options:
-          - "all"
-          - "afa-stores"
-          - "english-elm"
-          - "grayson-living"
-          - "france-and-son"
-          - "grayson-luxury"
+        type: string
         default: "all"
       total_sitemaps:
         description: "Total sitemaps to process (0 = auto)"
@@ -349,6 +342,7 @@ jobs:
 
       - name: Upload to FTP (if configured)
         if: steps.merge_csv.outputs.final_rows > 0
+        continue-on-error: true
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USER }}

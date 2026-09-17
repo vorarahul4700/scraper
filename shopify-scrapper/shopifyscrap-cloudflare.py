@@ -87,9 +87,9 @@ SITEMAP_OFFSET = int(os.getenv("SITEMAP_OFFSET", "0"))
 MAX_SITEMAPS = int(os.getenv("MAX_SITEMAPS", "0"))
 MAX_URLS_PER_SITEMAP = int(os.getenv("MAX_URLS_PER_SITEMAP", "0"))
 
-# Reduced workers to avoid detection
-MAX_WORKERS = min(int(os.getenv("MAX_WORKERS", "4")), 6)  # Max 6 workers
-REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY_BASE", os.getenv("REQUEST_DELAY", "1.0")))
+# Reduced workers to avoid detection (cap at 4 max for Shopify API)
+MAX_WORKERS = min(int(os.getenv("MAX_WORKERS", "3")), 4)  # Max 4 workers
+REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY_BASE", os.getenv("REQUEST_DELAY", "0.3")))
 
 OUTPUT_CSV = f"products_chunk_{SITEMAP_OFFSET}.csv"
 SCRAPED_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")  # Fixed deprecated utcnow()
@@ -230,7 +230,7 @@ class RequestManager:
         
         # Synchronized retry backoff across all threads
         if status == 429:
-            delay = random.uniform(10.0, 20.0)
+            delay = random.uniform(3.0, 5.0)
             with self.lock:
                 new_until = time.time() + delay
                 if new_until > self.rate_limit_until:
@@ -239,7 +239,7 @@ class RequestManager:
             time.sleep(delay)
             return self.fetch(url, retry_count + 1, crawl_delay, json_mode)
         elif status in [403, 503]:
-            delay = random.uniform(5.0, 10.0)
+            delay = random.uniform(2.0, 4.0)
             with self.lock:
                 new_until = time.time() + delay
                 if new_until > self.rate_limit_until:
