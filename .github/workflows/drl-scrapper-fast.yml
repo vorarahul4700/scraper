@@ -338,8 +338,10 @@ jobs:
           sudo apt-get update && sudo apt-get install -y lftp
           lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
           set ftp:ssl-allow no
-          set cmd:fail-exit yes
-          cd $FTP_BASE_DIR
+          set cmd:fail-exit no
+          if [ -n "$FTP_BASE_DIR" ]; then
+            cd "$FTP_BASE_DIR" || (mkdir -p "$FTP_BASE_DIR" && cd "$FTP_BASE_DIR")
+          fi
           put "${FILE}"
           bye
           EOF
