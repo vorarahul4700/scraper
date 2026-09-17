@@ -183,14 +183,6 @@
         "status": "pending",
         "notes": ""
     },
-    "houzz": {
-        "name": "Houzz",
-        "domain": "houzz.com",
-        "url": "https://www.houzz.com",
-        "scraper": "shopify-scrapper/shopifyscrap-cloudflare.py",
-        "status": "ready",
-        "notes": "Shopify - Normal"
-    },
     "luxedecor": {
         "name": "LuxeDecor",
         "domain": "luxedecor.com",
