@@ -48,12 +48,11 @@ class RequestManager:
             delay=10  # Cloudflare challenge delay
         )
         
-        # Enhanced headers for both scrapers
+        # Headers for HTML/XML pages (sitemap, robots.txt)
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
             "Accept-Language": "en-US,en;q=0.9",
-            # "Accept-Encoding": "gzip, deflate, br",
             "DNT": "1",
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
@@ -62,6 +61,19 @@ class RequestManager:
             "Sec-Fetch-Site": "none",
             "Sec-Fetch-User": "?1",
             "Cache-Control": "max-age=0",
+            "Referer": CURR_URL + "/",
+        }
+        # Headers for JSON API requests (product .json endpoint)
+        self.json_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "Cache-Control": "no-cache",
             "Referer": CURR_URL + "/",
         }
         
@@ -124,7 +136,7 @@ class RequestManager:
             log(f"Curl_cffi error for {url}: {e}")
             return None, 0
     
-    def fetch(self, url: str, retry_count: int = 0, crawl_delay=None) -> Optional[str]:
+    def fetch(self, url: str, retry_count: int = 0, crawl_delay=None, json_mode: bool = False) -> Optional[str]:
         """Intelligent fetching with fallback strategies"""
         if retry_count >= len(self.retry_delays):
             log(f"Max retries exceeded for {url}")
@@ -135,8 +147,15 @@ class RequestManager:
             # First try: cloudscraper (best for Cloudflare)
             content, status = self._fetch_with_cloudscraper(url, crawl_delay)
         elif retry_count % 2 == 1:
-            # Odd retries: curl_cffi
-            content, status = self._fetch_with_curl_cffi(url, crawl_delay)
+            # Odd retries: curl_cffi with appropriate headers
+            try:
+                self._respect_rate_limit(crawl_delay)
+                h = self.json_headers if json_mode else self.headers
+                response = cc_requests.get(url, headers=h, timeout=45, impersonate="chrome120")
+                content, status = (response.text, response.status_code) if response.status_code == 200 else (None, response.status_code)
+            except Exception as e:
+                log(f"Curl_cffi error for {url}: {e}")
+                content, status = None, 0
         else:
             # Even retries: cloudscraper again
             content, status = self._fetch_with_cloudscraper(url, crawl_delay)
@@ -168,9 +187,9 @@ request_manager = RequestManager()
 
 # ================= HTTP FUNCTIONS =================
 
-def http_get(url: str, crawl_delay=None) -> Optional[str]:
+def http_get(url: str, crawl_delay=None, json_mode: bool = False) -> Optional[str]:
     """Wrapper for request manager"""
-    return request_manager.fetch(url, crawl_delay=crawl_delay)
+    return request_manager.fetch(url, crawl_delay=crawl_delay, json_mode=json_mode)
 
 def load_xml(url: str, crawl_delay=None) -> Optional[ET.Element]:
     data = http_get(url, crawl_delay)
@@ -183,7 +202,7 @@ def load_xml(url: str, crawl_delay=None) -> Optional[ET.Element]:
         return None
 
 def fetch_json(url: str, crawl_delay=None) -> Optional[dict]:
-    data = http_get(url, crawl_delay)
+    data = http_get(url, crawl_delay, json_mode=True)
     if not data:
         return None
     try:
@@ -305,41 +324,58 @@ def process_product(url: str, writer, seen: set, crawl_delay=None):
 # ================= ROBOTS.TXT CHECK =================
 
 def check_robots_txt():
-    """Check robots.txt for crawl delays and sitemap location"""
+    """Check robots.txt for crawl delays and sitemap location.
+    Only reads Crawl-delay from the User-agent: * section to avoid picking up
+    delays meant for specific bots (AhrefsBot, MJ12bot, etc.).
+    """
     robots_url = f"{CURR_URL}/robots.txt"
     log(f"Checking robots.txt: {robots_url}")
     
     robots_content = http_get(robots_url)
-    if robots_content:
-        lines = robots_content.split('\n')
-        crawl_delay = None
-        sitemap_url = None
-        
-        for line in lines:
-            line = line.strip()
-            # Handle sitemap entries - correctly parse the full URL
-            if line.lower().startswith('sitemap:'):
-                parts = line.split(':', 1)
-                if len(parts) > 1:
-                    potential_url = parts[1].strip()
-                    # Validate it's a proper URL
-                    if potential_url.startswith('http'):
-                        sitemap_url = potential_url
-                        log(f"Found valid sitemap in robots.txt: {sitemap_url}")
-            # Handle crawl-delay entries
-            elif line.lower().startswith('crawl-delay:'):
-                try:
-                    parts = line.split(':', 1)
-                    if len(parts) > 1:
-                        crawl_delay = float(parts[1].strip())
-                        log(f"Found Crawl-delay: {crawl_delay} seconds")
-                except (ValueError, IndexError) as e:
-                    log(f"Error parsing crawl-delay: {e}")
-        
-        return crawl_delay, sitemap_url
+    if not robots_content:
+        log("No robots.txt found or couldn't fetch it")
+        return None, None
+
+    lines = robots_content.split('\n')
+    crawl_delay = None
+    sitemap_url = None
+    in_wildcard_section = False  # track if we're in User-agent: * block
     
-    log("No robots.txt found or couldn't fetch it")
-    return None, None
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        
+        lower = line.lower()
+        
+        # Detect User-agent section changes
+        if lower.startswith('user-agent:'):
+            ua = line.split(':', 1)[1].strip()
+            in_wildcard_section = (ua == '*')
+            continue
+        
+        # Sitemap is global (not per user-agent) — collect it from anywhere
+        if lower.startswith('sitemap:'):
+            parts = line.split(':', 1)
+            if len(parts) > 1:
+                potential_url = parts[1].strip()
+                if potential_url.startswith('http') and not sitemap_url:
+                    sitemap_url = potential_url
+                    log(f"Found sitemap in robots.txt: {sitemap_url}")
+            continue
+        
+        # Crawl-delay: only honour from the User-agent: * section
+        if lower.startswith('crawl-delay:') and in_wildcard_section and crawl_delay is None:
+            try:
+                crawl_delay = float(line.split(':', 1)[1].strip())
+                log(f"Found Crawl-delay for *: {crawl_delay} seconds")
+            except (ValueError, IndexError) as e:
+                log(f"Error parsing crawl-delay: {e}")
+    
+    if crawl_delay is None:
+        log("No Crawl-delay specified for User-agent: * — using configured REQUEST_DELAY_BASE")
+    
+    return crawl_delay, sitemap_url
 
 # ================= MAIN =================
 
