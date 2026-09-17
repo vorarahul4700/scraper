@@ -1,27 +1,49 @@
-name: Parallel Sitemap Scraper (Cloudflare Resistant v2.0)
+name: Shopify Multi-Store Cloudflare-Resistant Scraper Fast
 
 on:
   workflow_dispatch:
     inputs:
-      url:
-        description: "Base site URL (e.g., https://www.graysonliving.com)"
+      store:
+        description: "Choose store to scrape (select 'all' to chain AFA -> EE -> GL -> FAS -> GLX)"
         required: true
-        default: "https://www.graysonliving.com"
+        type: choice
+        options:
+          - "all"
+          - "afa-stores"
+          - "english-elm"
+          - "grayson-living"
+          - "france-and-son"
+          - "grayson-luxury"
+        default: "all"
+      chain_queue:
+        description: "Internal queue of remaining stores in chain sequence (comma-separated)"
+        required: false
+        default: ""
       total_sitemaps:
         description: "Total sitemaps to process (0 = auto)"
         default: "0"
       sitemaps_per_job:
         description: "Sitemaps per parallel job"
         default: "2"
+      specific_offsets:
+        description: "Specific sitemap offsets (comma-separated, e.g. 0,2,4)"
+        default: ""
+      max_parallel_jobs:
+        description: "Max parallel runner jobs to execute at once"
+        default: "3"
       urls_per_sitemap:
-        description: "Max URLs per sitemap"
+        description: "Max URLs per sitemap (0 = all)"
         default: "200"
       max_workers:
-        description: "Parallel requests per job (recommended 2-4 for Cloudflare)"
+        description: "Parallel requests per job"
         default: "3"
       request_delay:
         description: "Base delay between requests in seconds"
         default: "1.5"
+
+permissions:
+  contents: read
+  actions: write
 
 env:
   PYTHON_VERSION: '3.11'
@@ -31,21 +53,112 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
-      total_sitemaps_found: ${{ steps.discovery.outputs.total_sitemaps }}
+      current_store: ${{ steps.resolve_chain.outputs.current_store }}
+      next_store: ${{ steps.resolve_chain.outputs.next_store }}
+      remaining_queue: ${{ steps.resolve_chain.outputs.remaining_queue }}
+      site_name: ${{ steps.resolve_store.outputs.site_name }}
+      base_url: ${{ steps.resolve_store.outputs.base_url }}
+      sitemap_url: ${{ steps.resolve_store.outputs.sitemap_url }}
     steps:
+      - name: Resolve Store and Chaining Sequence
+        id: resolve_chain
+        run: |
+          RAW_STORE="${{ github.event.inputs.store }}"
+          CHAIN_QUEUE="${{ github.event.inputs.chain_queue }}"
+
+          echo "Input store:       $RAW_STORE"
+          echo "Input chain_queue: $CHAIN_QUEUE"
+
+          # Canonical mapping: afa-stores -> english-elm -> grayson-living -> france-and-son -> grayson-luxury
+          if [ "$RAW_STORE" = "all" ]; then
+            CURRENT_STORE="afa-stores"
+            NEXT_STORE="english-elm"
+            REMAINING_QUEUE="grayson-living,france-and-son,grayson-luxury"
+          elif [ -n "$CHAIN_QUEUE" ]; then
+            CURRENT_STORE="$RAW_STORE"
+            NEXT_STORE=$(echo "$CHAIN_QUEUE" | cut -d',' -f1 | tr -d ' ')
+            if echo "$CHAIN_QUEUE" | grep -q ","; then
+              REMAINING_QUEUE=$(echo "$CHAIN_QUEUE" | cut -d',' -f2- | tr -d ' ')
+            else
+              REMAINING_QUEUE=""
+            fi
+          else
+            CURRENT_STORE="$RAW_STORE"
+            NEXT_STORE=""
+            REMAINING_QUEUE=""
+          fi
+
+          echo "current_store=$CURRENT_STORE" >> $GITHUB_OUTPUT
+          echo "next_store=$NEXT_STORE" >> $GITHUB_OUTPUT
+          echo "remaining_queue=$REMAINING_QUEUE" >> $GITHUB_OUTPUT
+
+          echo "========================================="
+          echo "Current Store to Scrape: $CURRENT_STORE"
+          echo "Next Store in Chain:     $NEXT_STORE"
+          echo "Remaining in Queue:      $REMAINING_QUEUE"
+          echo "========================================="
+
+      - name: Resolve Store URLs & Configuration
+        id: resolve_store
+        run: |
+          STORE="${{ steps.resolve_chain.outputs.current_store }}"
+
+          case "$STORE" in
+            "afa-stores"|"afa")
+              BASE_URL="https://www.afastores.com"
+              SITEMAP_URL="https://www.afastores.com/sitemap.xml"
+              SITE_NAME="afastores"
+              ;;
+            "english-elm"|"ee")
+              BASE_URL="https://englishelm.com"
+              SITEMAP_URL="https://englishelm.com/sitemap.xml"
+              SITE_NAME="englishelm"
+              ;;
+            "grayson-living"|"gl")
+              BASE_URL="https://www.graysonliving.com"
+              SITEMAP_URL="https://www.graysonliving.com/sitemap.xml"
+              SITE_NAME="graysonliving"
+              ;;
+            "france-and-son"|"fas")
+              BASE_URL="https://www.franceandson.com"
+              SITEMAP_URL="https://www.franceandson.com/sitemap.xml"
+              SITE_NAME="franceandson"
+              ;;
+            "grayson-luxury"|"glx")
+              BASE_URL="https://www.graysonluxury.com"
+              SITEMAP_URL="https://www.graysonluxury.com/sitemap.xml"
+              SITE_NAME="graysonluxury"
+              ;;
+            *)
+              BASE_URL="https://www.graysonliving.com"
+              SITEMAP_URL="https://www.graysonliving.com/sitemap.xml"
+              SITE_NAME="graysonliving"
+              ;;
+          esac
+
+          echo "base_url=$BASE_URL" >> $GITHUB_OUTPUT
+          echo "sitemap_url=$SITEMAP_URL" >> $GITHUB_OUTPUT
+          echo "site_name=$SITE_NAME" >> $GITHUB_OUTPUT
+
+          echo "========================================="
+          echo "Base URL:       $BASE_URL"
+          echo "Sitemap URL:    $SITEMAP_URL"
+          echo "Site Name:      $SITE_NAME"
+          echo "========================================="
+
       - name: Discover sitemap structure
         id: discovery
         run: |
-          URL="${{ github.event.inputs.url }}"
+          URL="${{ steps.resolve_store.outputs.base_url }}"
+          SITEMAP_URL="${{ steps.resolve_store.outputs.sitemap_url }}"
           
-          # Install dependencies
           sudo apt-get update
           sudo apt-get install -y curl
           
           echo "Discovering sitemap structure for: $URL"
           
-          # Try multiple sitemap locations
           SITEMAP_LOCATIONS=(
+            "$SITEMAP_URL"
             "$URL/sitemap.xml"
             "$URL/sitemap_index.xml"
             "$URL/sitemaps/sitemap.xml"
@@ -62,7 +175,6 @@ jobs:
             fi
           done
           
-          # Fallback
           echo "Could not auto-detect sitemap, using default"
           echo "total_sitemaps=20" >> $GITHUB_OUTPUT
 
@@ -71,39 +183,51 @@ jobs:
         run: |
           DISCOVERED=${{ steps.discovery.outputs.total_sitemaps }}
           USER_INPUT=${{ github.event.inputs.total_sitemaps }}
-          
-          if [ "$USER_INPUT" -gt 0 ]; then
-            TOTAL=$USER_INPUT
-          elif [ "$DISCOVERED" -gt 0 ]; then
-            TOTAL=$DISCOVERED
-          else
-            TOTAL=20
-          fi
-          
+          SPECIFIC="${{ github.event.inputs.specific_offsets }}"
+          BASE_URL="${{ steps.resolve_store.outputs.base_url }}"
+          SITEMAP_URL="${{ steps.resolve_store.outputs.sitemap_url }}"
           PER_JOB=${{ github.event.inputs.sitemaps_per_job }}
-          URL="${{ github.event.inputs.url }}"
           REQ_DELAY="${{ github.event.inputs.request_delay }}"
           
-          JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))
-          
           MATRIX="["
-          for ((i=0;i<JOBS;i++)); do
-            OFFSET=$(( i * PER_JOB ))
-            MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$URL\",\"request_delay\":\"$REQ_DELAY\"},"
-          done
+          if [ -n "$SPECIFIC" ]; then
+            echo "Building matrix from specific offsets: $SPECIFIC"
+            IFS=',' read -ra OFFSETS <<< "$SPECIFIC"
+            for off in "${OFFSETS[@]}"; do
+              CLEAN_OFF=$(echo "$off" | tr -d ' ')
+              if [ -n "$CLEAN_OFF" ]; then
+                MATRIX+="{\"offset\":$CLEAN_OFF,\"limit\":1,\"url\":\"$BASE_URL\",\"sitemap\":\"$SITEMAP_URL\",\"request_delay\":\"$REQ_DELAY\"},"
+              fi
+            done
+          else
+            if [ "$USER_INPUT" -gt 0 ]; then
+              TOTAL=$USER_INPUT
+            elif [ "$DISCOVERED" -gt 0 ]; then
+              TOTAL=$DISCOVERED
+            else
+              TOTAL=20
+            fi
+            
+            JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))
+            
+            for ((i=0;i<JOBS;i++)); do
+              OFFSET=$(( i * PER_JOB ))
+              MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$BASE_URL\",\"sitemap\":\"$SITEMAP_URL\",\"request_delay\":\"$REQ_DELAY\"},"
+            done
+          fi
           MATRIX="${MATRIX%,}]"
           
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-          echo "Total: $TOTAL sitemaps, $JOBS jobs"
+          echo "Matrix planned: $MATRIX"
 
   scrape:
     needs: plan
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJson(github.event.inputs.max_parallel_jobs || '3') }}
       matrix:
         include: ${{ fromJson(needs.plan.outputs.matrix) }}
-    # timeout-minutes: 120
 
     steps:
       - name: Checkout repository
@@ -122,113 +246,206 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install cloudscraper curl-cffi requests lxml
+          pip install cloudscraper curl-cffi requests beautifulsoup4 lxml
 
       - name: Run Cloudflare-resistant scraper
         env:
+          TARGET_STORE: ${{ needs.plan.outputs.current_store }}
           CURR_URL: ${{ matrix.url }}
+          SITEMAP_INDEX: ${{ matrix.sitemap }}
           SITEMAP_OFFSET: ${{ matrix.offset }}
           MAX_SITEMAPS: ${{ matrix.limit }}
           MAX_URLS_PER_SITEMAP: ${{ github.event.inputs.urls_per_sitemap }}
           MAX_WORKERS: ${{ github.event.inputs.max_workers }}
           REQUEST_DELAY_BASE: ${{ matrix.request_delay }}
         run: |
+          echo "Starting Shopify fast scraper job:"
+          echo "Store:          ${{ needs.plan.outputs.current_store }}"
+          echo "CURR_URL:       $CURR_URL"
+          echo "SITEMAP_INDEX:  $SITEMAP_INDEX"
+          echo "SITEMAP_OFFSET: $SITEMAP_OFFSET"
+          echo "MAX_SITEMAPS:   $MAX_SITEMAPS"
+          echo "MAX_WORKERS:    $MAX_WORKERS"
+          echo "REQUEST_DELAY:  $REQUEST_DELAY_BASE"
+          echo ""
+
           python shopify-scrapper/shopifyscrap-cloudflare.py
+
+          echo ""
+          echo "Generated CSV chunk files:"
+          ls -la products_chunk_*.csv 2>/dev/null || echo "No CSV chunk generated"
 
       - name: Upload chunk artifact
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: chunk_${{ matrix.offset }}
           path: products_chunk_*.csv
+          if-no-files-found: warn
           retention-days: 1
 
   merge:
-    needs: scrape
+    needs: [plan, scrape]
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && !cancelled()
     
     steps:
       - name: Download all chunk artifacts
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           path: chunks
           pattern: chunk_*
-          merge-multiple: false
+          merge-multiple: true
+
+      - name: Check for CSV chunk files
+        id: check_files
+        run: |
+          CSV_FILES=$(find chunks -name "products_chunk_*.csv" 2>/dev/null || echo "")
+
+          if [ -z "$CSV_FILES" ]; then
+            echo "has_files=false" >> $GITHUB_OUTPUT
+            echo "WARNING: No CSV chunks found to merge."
+          else
+            echo "has_files=true" >> $GITHUB_OUTPUT
+            CHUNK_COUNT=$(echo "$CSV_FILES" | wc -l)
+            echo "chunk_count=$CHUNK_COUNT" >> $GITHUB_OUTPUT
+            echo "Found $CHUNK_COUNT CSV chunks to merge."
+          fi
 
       - name: Merge CSV chunks
+        id: merge_csv
+        if: steps.check_files.outputs.has_files == 'true'
         run: |
-          echo "Merging CSV files..."
-          
-          # Find all CSV files
-          find chunks -name "*.csv" -type f | sort > csv_files.txt
-          
-          if [ ! -s csv_files.txt ]; then
-            echo "No CSV files found to merge!"
-            exit 1
-          fi
-          
-          FIRST_FILE=$(head -n 1 csv_files.txt)
-          
-          # Create merged file with header from first file
+          echo "Merging all CSV chunk files..."
+          CSV_FILES=$(find chunks -name "products_chunk_*.csv")
+          FIRST_FILE=$(echo "$CSV_FILES" | head -n 1)
+
           head -n 1 "$FIRST_FILE" > products_full.csv
-          
-          # Append data from all files (skip headers)
-          while IFS= read -r csv_file; do
-            echo "Adding: $csv_file"
-            tail -n +2 "$csv_file" >> products_full.csv
-          done < csv_files.txt
-          
-          ROW_COUNT=$(tail -n +2 products_full.csv | wc -l | tr -d ' ')
-          echo "Merged $ROW_COUNT product rows"
+
+          FILE_COUNT=0
+          TOTAL_ROWS=0
+          for f in $CSV_FILES; do
+            if [ -f "$f" ]; then
+              FILE_COUNT=$((FILE_COUNT + 1))
+              ROWS=$(tail -n +2 "$f" 2>/dev/null | wc -l || echo "0")
+              TOTAL_ROWS=$((TOTAL_ROWS + ROWS))
+              echo "Merging chunk $f ($ROWS rows)"
+              tail -n +2 "$f" 2>/dev/null | sed '/^$/d' >> products_full.csv
+            fi
+          done
+
+          FINAL_ROWS=$(tail -n +2 products_full.csv 2>/dev/null | wc -l || echo "0")
+          echo "Total merged product rows: $FINAL_ROWS from $FILE_COUNT files"
+          echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+          echo "final_rows=$FINAL_ROWS" >> $GITHUB_OUTPUT
 
       - name: Generate output filename
-        id: filename
+        id: meta
         run: |
-          SITE=$(echo "${{ github.event.inputs.url }}" | sed -E 's|https?://||;s|/.*||')
-          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-          echo "filename=${SITE}_products_${TIMESTAMP}.csv" >> $GITHUB_OUTPUT
-          echo "Output file: ${SITE}_products_${TIMESTAMP}.csv"
+          SITE_NAME="${{ needs.plan.outputs.site_name }}"
+          if [ -z "$SITE_NAME" ]; then
+            SITE_NAME="shopify_store"
+          fi
+          DATE=$(date +%F_%H%M%S)
+          echo "name=${SITE_NAME}_${DATE}.csv" >> $GITHUB_OUTPUT
+          if [ -f products_full.csv ]; then
+            cp products_full.csv "${SITE_NAME}_${DATE}.csv"
+          fi
 
-      - name: Upload to FTP (Optional)
+      - name: Upload to FTP (if configured)
+        if: steps.merge_csv.outputs.final_rows > 0
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}
-          FTP_PATH: ${{ secrets.FTP_PATH }}
-          OUTPUT_FILE: ${{ steps.filename.outputs.filename }}
+          FTP_BASE_DIR: ${{ secrets.FTP_PATH }}
+          FILE: ${{ steps.meta.outputs.name }}
         run: |
-          sudo apt-get install -y lftp
-          echo "Uploading to FTP..."
+          if [ -z "$FTP_HOST" ] || [ -z "$FTP_USER" ] || [ -z "$FTP_PASS" ]; then
+            echo "FTP credentials not configured. Skipping FTP upload."
+            exit 0
+          fi
+
+          sudo apt-get update && sudo apt-get install -y lftp
           lftp -u "$FTP_USER","$FTP_PASS" "$FTP_HOST" <<EOF
-          set ssl:verify-certificate no
-          mkdir -p $FTP_PATH
-          cd $FTP_PATH
-          put products_full.csv -o $OUTPUT_FILE
-          ls -la $OUTPUT_FILE
+          set ftp:ssl-allow no
+          set cmd:fail-exit yes
+          cd $FTP_BASE_DIR
+          put "${FILE}"
           bye
           EOF
-          echo "FTP upload complete"
+          echo "FTP upload completed: $FILE"
 
-      - name: Upload merged CSV as artifact
+      - name: Output Summary Report
+        run: |
+          STORE_NAME="${{ needs.plan.outputs.current_store }}"
+          BASE_URL="${{ needs.plan.outputs.base_url }}"
+          SITEMAP_URL="${{ needs.plan.outputs.sitemap_url }}"
+          OUTPUT_FILE="${{ steps.meta.outputs.name }}"
+          CHUNKS_MERGED="${{ steps.merge_csv.outputs.file_count || '0' }}"
+          TOTAL_PRODUCTS="${{ steps.merge_csv.outputs.final_rows || '0' }}"
+          NEXT_STORE="${{ needs.plan.outputs.next_store }}"
+
+          echo "========================================="
+          echo "           SCRAPING SUMMARY"
+          echo "========================================="
+          echo "Completed Store: $STORE_NAME"
+          echo "Base URL:        $BASE_URL"
+          echo "Sitemap URL:     $SITEMAP_URL"
+          echo "Output File:     $OUTPUT_FILE"
+          echo "Chunks Merged:   $CHUNKS_MERGED"
+          echo "Total Products:  $TOTAL_PRODUCTS rows"
+          echo "Next in Chain:   ${NEXT_STORE:-'None (Chain Complete)'}"
+          echo "========================================="
+
+          if [ -f "products_full.csv" ]; then
+            echo ""
+            echo "Sample Rows (First 3):"
+            head -n 4 products_full.csv
+          fi
+
+      - name: Archive results
+        if: steps.merge_csv.outputs.final_rows > 0
         uses: actions/upload-artifact@v4
         with:
-          name: merged_products
-          path: products_full.csv
+          name: ${{ steps.meta.outputs.name }}
+          path: |
+            products_full.csv
+            ${{ steps.meta.outputs.name }}
           retention-days: 7
 
-      - name: Create summary report
+  trigger_next_store:
+    needs: [plan, merge]
+    runs-on: ubuntu-latest
+    if: always() && !cancelled() && needs.plan.outputs.next_store != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trigger next store in chain via workflow_dispatch
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GH_PAT || secrets.GITHUB_TOKEN }}
         run: |
-          TOTAL_CHUNKS=$(find chunks -mindepth 1 -maxdepth 1 -type d | wc -l)
-          TOTAL_ROWS=$(tail -n +2 products_full.csv 2>/dev/null | wc -l | tr -d ' ' || echo "0")
-          
-          echo "## Scraping Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- **Target URL**: ${{ github.event.inputs.url }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Total Chunks**: $TOTAL_CHUNKS" >> $GITHUB_STEP_SUMMARY
-          echo "- **Total Products**: $TOTAL_ROWS" >> $GITHUB_STEP_SUMMARY
-          echo "- **Output File**: ${{ steps.filename.outputs.filename }}" >> $GITHUB_STEP_SUMMARY
-          
-          if [ $TOTAL_ROWS -gt 0 ]; then
-            echo "✅ Scraping completed successfully!" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "⚠️ Warning: No products were scraped" >> $GITHUB_STEP_SUMMARY
-          fi
+          NEXT_STORE="${{ needs.plan.outputs.next_store }}"
+          REMAINING_QUEUE="${{ needs.plan.outputs.remaining_queue }}"
+
+          echo "========================================="
+          echo "Chaining to Next Store in Sequence"
+          echo "Next Store:      $NEXT_STORE"
+          echo "Remaining Queue: $REMAINING_QUEUE"
+          echo "========================================="
+
+          gh workflow run shopifyscrapper-cloudflare.yml \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}" \
+            --field store="$NEXT_STORE" \
+            --field chain_queue="$REMAINING_QUEUE" \
+            --field total_sitemaps="${{ github.event.inputs.total_sitemaps }}" \
+            --field sitemaps_per_job="${{ github.event.inputs.sitemaps_per_job }}" \
+            --field specific_offsets="${{ github.event.inputs.specific_offsets }}" \
+            --field max_parallel_jobs="${{ github.event.inputs.max_parallel_jobs }}" \
+            --field urls_per_sitemap="${{ github.event.inputs.urls_per_sitemap }}" \
+            --field max_workers="${{ github.event.inputs.max_workers }}" \
+            --field request_delay="${{ github.event.inputs.request_delay }}"
+
+          echo "✓ Successfully triggered workflow for $NEXT_STORE!"

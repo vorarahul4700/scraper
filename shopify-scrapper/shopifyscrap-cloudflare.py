@@ -13,9 +13,76 @@ from xml.etree import ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 
+# ================= STORE REGISTRY =================
+STORE_REGISTRY = {
+    "afa-stores": {
+        "name": "AFA Stores",
+        "domain": "afastores.com",
+        "url": "https://www.afastores.com",
+        "sitemap": "https://www.afastores.com/sitemap.xml",
+    },
+    "english-elm": {
+        "name": "English Elm",
+        "domain": "englishelm.com",
+        "url": "https://englishelm.com",
+        "sitemap": "https://englishelm.com/sitemap.xml",
+    },
+    "grayson-living": {
+        "name": "Grayson Living",
+        "domain": "graysonliving.com",
+        "url": "https://www.graysonliving.com",
+        "sitemap": "https://www.graysonliving.com/sitemap.xml",
+    },
+    "france-and-son": {
+        "name": "France & Son",
+        "domain": "franceandson.com",
+        "url": "https://www.franceandson.com",
+        "sitemap": "https://www.franceandson.com/sitemap.xml",
+    },
+    "grayson-luxury": {
+        "name": "Grayson Luxury",
+        "domain": "graysonluxury.com",
+        "url": "https://www.graysonluxury.com",
+        "sitemap": "https://www.graysonluxury.com/sitemap.xml",
+    },
+}
+
+STORE_ALIASES = {
+    "afa": "afa-stores",
+    "ee": "english-elm",
+    "gl": "grayson-living",
+    "fas": "france-and-son",
+    "glx": "grayson-luxury",
+}
+
 # ================= ENV =================
 
-CURR_URL = os.getenv("CURR_URL", "").rstrip("/")
+TARGET_STORE = os.getenv("TARGET_STORE", "").strip().lower()
+TARGET_STORE = STORE_ALIASES.get(TARGET_STORE, TARGET_STORE)
+
+RAW_CURR_URL = os.getenv("CURR_URL", "").strip().rstrip("/")
+if not RAW_CURR_URL and TARGET_STORE in STORE_REGISTRY:
+    CURR_URL = STORE_REGISTRY[TARGET_STORE]["url"]
+elif RAW_CURR_URL:
+    CURR_URL = RAW_CURR_URL
+else:
+    CURR_URL = "https://www.graysonliving.com"
+
+# Auto-detect store if CURR_URL provided but TARGET_STORE is not
+if not TARGET_STORE:
+    for store_key, store_data in STORE_REGISTRY.items():
+        if store_data["domain"] in CURR_URL:
+            TARGET_STORE = store_key
+            break
+
+RAW_SITEMAP = os.getenv("SITEMAP_INDEX", "").strip()
+if RAW_SITEMAP:
+    SITEMAP_INDEX = RAW_SITEMAP
+elif TARGET_STORE in STORE_REGISTRY:
+    SITEMAP_INDEX = STORE_REGISTRY[TARGET_STORE]["sitemap"]
+else:
+    SITEMAP_INDEX = f"{CURR_URL}/sitemap.xml"
+
 SITEMAP_OFFSET = int(os.getenv("SITEMAP_OFFSET", "0"))
 MAX_SITEMAPS = int(os.getenv("MAX_SITEMAPS", "0"))
 MAX_URLS_PER_SITEMAP = int(os.getenv("MAX_URLS_PER_SITEMAP", "0"))
@@ -24,7 +91,6 @@ MAX_URLS_PER_SITEMAP = int(os.getenv("MAX_URLS_PER_SITEMAP", "0"))
 MAX_WORKERS = min(int(os.getenv("MAX_WORKERS", "4")), 6)  # Max 6 workers
 REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY_BASE", os.getenv("REQUEST_DELAY", "1.0")))
 
-SITEMAP_INDEX = f"{CURR_URL}/sitemap.xml"
 OUTPUT_CSV = f"products_chunk_{SITEMAP_OFFSET}.csv"
 SCRAPED_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")  # Fixed deprecated utcnow()
 
