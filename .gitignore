@@ -23,3 +23,4 @@ scripts/init_dashboard_db.py
 skills-lock.json
 test/
 utils/
+temp/

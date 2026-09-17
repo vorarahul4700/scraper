@@ -40,6 +40,9 @@ permissions:
   contents: read
   actions: write
 
+env:
+  PYTHON_VERSION: '3.11'
+
 jobs:
   plan:
     runs-on: ubuntu-latest
@@ -128,10 +131,122 @@ jobs:
           echo "Site Name:      $SITE_NAME"
           echo "========================================="
 
+      - name: Set up Python for discovery
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Python dependencies for discovery
+        run: |
+          python -m pip install --upgrade pip
+          pip install cloudscraper curl-cffi requests beautifulsoup4 lxml
+
+      - name: Discover sitemap structure via Cloudflare Solver
+        id: discovery
+        env:
+          BASE_URL: ${{ steps.resolve_store.outputs.base_url }}
+          SITEMAP_URL: ${{ steps.resolve_store.outputs.sitemap_url }}
+        run: |
+          python - << 'EOF'
+          import os
+          import sys
+          import time
+          import random
+          import xml.etree.ElementTree as ET
+          import cloudscraper
+          from curl_cffi import requests as cc_requests
+
+          def log(msg):
+              sys.stderr.write(f"[{time.strftime('%H:%M:%S')}] [Discovery] {msg}\n")
+              sys.stderr.flush()
+
+          base_url = os.getenv("BASE_URL", "").rstrip("/")
+          sitemap_url = os.getenv("SITEMAP_URL", "")
+
+          candidates = [
+              sitemap_url,
+              f"{base_url}/sitemap.xml",
+              f"{base_url}/sitemap_index.xml",
+              f"{base_url}/sitemaps/sitemap.xml",
+              f"{base_url}/sitemaps/sitemap_discount.xml",
+              f"{base_url}/sitemaps/sitemap_diningrooms.xml",
+              f"{base_url}/sitemaps/sitemap_tvstands.xml",
+          ]
+          urls_to_try = []
+          for u in candidates:
+              if u and u not in urls_to_try:
+                  urls_to_try.append(u)
+
+          scraper = cloudscraper.create_scraper(
+              browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False},
+              delay=10
+          )
+          headers = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              "Accept-Language": "en-US,en;q=0.9",
+          }
+
+          found_count = 0
+
+          for target_url in urls_to_try:
+              log(f"Attempting sitemap discovery for: {target_url}")
+              for attempt in range(1, 6):  # Max 5 retries per candidate URL
+                  content = None
+                  status = 0
+                  try:
+                      if attempt % 2 == 1:
+                          log(f"  [Attempt {attempt}/5] Using Cloudscraper...")
+                          resp = scraper.get(target_url, timeout=30)
+                          status = resp.status_code
+                          if status == 200:
+                              content = resp.text
+                      else:
+                          log(f"  [Attempt {attempt}/5] Using curl_cffi (chrome120)...")
+                          resp = cc_requests.get(target_url, headers=headers, timeout=30, impersonate="chrome120")
+                          status = resp.status_code
+                          if status == 200:
+                              content = resp.text
+                  except Exception as e:
+                      log(f"  [Attempt {attempt}/5] Exception: {e}")
+
+                  if content and ("<sitemap" in content.lower() or "<url" in content.lower() or "<?xml" in content.lower()):
+                      try:
+                          root = ET.fromstring(content)
+                          locs = root.findall(".//{*}loc")
+                          if locs:
+                              found_count = len(locs)
+                              log(f"SUCCESS! Discovered {found_count} sitemap entries at {target_url}")
+                              break
+                      except Exception:
+                          loc_count = content.lower().count("<loc>")
+                          if loc_count > 0:
+                              found_count = loc_count
+                              log(f"SUCCESS! Found {found_count} <loc> tags in raw XML at {target_url}")
+                              break
+
+                  backoff = (2.0 * attempt) + random.uniform(0.5, 2.0)
+                  log(f"  [Attempt {attempt}/5] Status {status}. Waiting {backoff:.1f}s before retry...")
+                  time.sleep(backoff)
+
+              if found_count > 0:
+                  break
+
+          if found_count == 0:
+              log("Could not auto-detect sitemap using Cloudflare solver after 5 retries. Defaulting to 10.")
+              found_count = 10
+
+          github_output = os.getenv("GITHUB_OUTPUT")
+          if github_output:
+              with open(github_output, "a") as f:
+                  f.write(f"total_sitemaps={found_count}\n")
+          EOF
+
       - name: Generate Matrix
         id: matrix
         run: |
-          TOTAL=${{ github.event.inputs.total_sitemaps }}
+          DISCOVERED=${{ steps.discovery.outputs.total_sitemaps }}
+          USER_INPUT=${{ github.event.inputs.total_sitemaps }}
           PER_JOB=${{ github.event.inputs.sitemaps_per_job }}
           BASE_URL="${{ steps.resolve_store.outputs.base_url }}"
           SITEMAP_URL="${{ steps.resolve_store.outputs.sitemap_url }}"
@@ -148,8 +263,11 @@ jobs:
               fi
             done
           else
-            if [ "$TOTAL" -eq 0 ]; then
-              echo "Auto total sitemaps: defaulting to 10"
+            if [ "$USER_INPUT" -gt 0 ]; then
+              TOTAL=$USER_INPUT
+            elif [ "$DISCOVERED" -gt 0 ]; then
+              TOTAL=$DISCOVERED
+            else
               TOTAL=10
             fi
 
