@@ -35,7 +35,7 @@ on:
         default: "3"
       request_delay:
         description: "Base delay between requests in seconds"
-        default: "1.5"
+        default: "0.3"
 
 permissions:
   contents: read

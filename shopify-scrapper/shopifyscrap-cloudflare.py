@@ -149,15 +149,12 @@ class RequestManager:
         self.last_request_time = 0
         
     def _respect_rate_limit(self, crawl_delay=None):
-        """Add random delay between requests"""
+        """Add minimal delay between requests"""
         current_time = time.time()
         if self.request_count > 0:
             elapsed = current_time - self.last_request_time
-            # Use crawl_delay from robots.txt if provided, otherwise use base delay
             base_delay = crawl_delay if crawl_delay else REQUEST_DELAY_BASE
-            min_delay = base_delay * 0.8  # 80% of base delay
-            max_delay = base_delay * 1.5  # 150% of base delay
-            target_delay = random.uniform(min_delay, max_delay)
+            target_delay = random.uniform(base_delay * 0.8, base_delay * 1.2)
             
             if elapsed < target_delay:
                 sleep_time = target_delay - elapsed
@@ -165,18 +162,12 @@ class RequestManager:
         
         self.last_request_time = time.time()
         self.request_count += 1
-        
-        # Occasionally longer pause
-        if self.request_count % 20 == 0:
-            long_pause = random.uniform(8, 15)
-            log(f"Taking longer pause after {self.request_count} requests: {long_pause:.1f}s")
-            time.sleep(long_pause)
     
     def _fetch_with_cloudscraper(self, url: str, crawl_delay=None) -> Optional[Tuple[str, int]]:
         """Use cloudscraper for Cloudflare-protected pages"""
         try:
             self._respect_rate_limit(crawl_delay)
-            response = self.scraper.get(url, timeout=45)
+            response = self.scraper.get(url, timeout=30)
             if response.status_code == 200:
                 return response.text, response.status_code
             return None, response.status_code
@@ -188,12 +179,11 @@ class RequestManager:
         """Use curl_cffi for JavaScript-heavy pages"""
         try:
             self._respect_rate_limit(crawl_delay)
-            # Use impersonate to mimic real browser TLS fingerprint
             response = cc_requests.get(
                 url, 
                 headers=self.headers,
-                timeout=45,
-                impersonate="chrome110"  # Mimic Chrome 110
+                timeout=30,
+                impersonate="chrome110"
             )
             if response.status_code == 200:
                 return response.text, response.status_code
@@ -203,54 +193,51 @@ class RequestManager:
             return None, 0
     
     def fetch(self, url: str, retry_count: int = 0, crawl_delay=None, json_mode: bool = False) -> Optional[str]:
-        """Intelligent fetching with fallback strategies"""
+        """Intelligent fetching with fast retry strategies"""
         if retry_count >= len(self.retry_delays):
             log(f"Max retries exceeded for {url}")
             return None
         
         # Choose strategy based on retry count
         if retry_count == 0:
-            # First try: cloudscraper (best for Cloudflare)
             content, status = self._fetch_with_cloudscraper(url, crawl_delay)
         elif retry_count % 2 == 1:
-            # Odd retries: curl_cffi with appropriate headers
             try:
                 self._respect_rate_limit(crawl_delay)
                 h = self.json_headers if json_mode else self.headers
-                response = cc_requests.get(url, headers=h, timeout=45, impersonate="chrome120")
+                response = cc_requests.get(url, headers=h, timeout=30, impersonate="chrome120")
                 content, status = (response.text, response.status_code) if response.status_code == 200 else (None, response.status_code)
             except Exception as e:
                 log(f"Curl_cffi error for {url}: {e}")
                 content, status = None, 0
         else:
-            # Even retries: cloudscraper again
             content, status = self._fetch_with_cloudscraper(url, crawl_delay)
         
         if content:
             return content
         
-        # Handle specific status codes
+        # Fast retry backoff
         if status == 429:
-            # 429 = Too Many Requests — use aggressive backoff
-            delay = self.retry_delays[retry_count] * 10 + random.uniform(5, 30)
-            log(f"HTTP 429 Too Many Requests for {url}, waiting {delay:.1f}s before retry {retry_count+1}")
+            delay = random.uniform(2.0, 4.0)
+            log(f"HTTP 429 for {url}, retrying in {delay:.1f}s (retry {retry_count+1})")
             time.sleep(delay)
             return self.fetch(url, retry_count + 1, crawl_delay, json_mode)
         elif status in [403, 503]:
-            delay = self.retry_delays[retry_count] * 5 + random.uniform(2, 10)
-            log(f"HTTP {status} for {url}, retry {retry_count+1} in {delay:.1f}s")
+            delay = random.uniform(1.0, 3.0)
+            log(f"HTTP {status} for {url}, retrying in {delay:.1f}s (retry {retry_count+1})")
             time.sleep(delay)
             return self.fetch(url, retry_count + 1, crawl_delay, json_mode)
         elif status == 404:
             log(f"URL not found: {url}")
             return None
         
-        # For other errors, retry with delay
         if status != 200:
-            delay = self.retry_delays[retry_count]
-            log(f"Retry {retry_count+1} for {url} in {delay}s")
+            delay = random.uniform(1.0, 2.0)
+            log(f"Retry {retry_count+1} for {url} in {delay:.1f}s")
             time.sleep(delay)
             return self.fetch(url, retry_count + 1, crawl_delay)
+        
+        return None
         
         return None
 
@@ -395,11 +382,6 @@ def process_product(url: str, writer, seen: set, crawl_delay=None):
         variants_processed += 1
     
     log(f"Processed {variants_processed} variants from {product_url}")
-    
-    # Variable delay between products - respect crawl delay if set
-    base_delay = crawl_delay if crawl_delay else REQUEST_DELAY_BASE
-    delay = random.uniform(base_delay * 0.8, base_delay * 1.5)
-    time.sleep(delay)
 
 # ================= ROBOTS.TXT CHECK =================
 
