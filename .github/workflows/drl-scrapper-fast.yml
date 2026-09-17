@@ -14,10 +14,6 @@ on:
           - "dining-rooms-outlet"
           - "tv-stands-outlet"
         default: "all"
-      chain_queue:
-        description: "Internal queue of remaining stores in chain sequence (comma-separated)"
-        required: false
-        default: ""
       total_sitemaps:
         description: "Total sitemaps to process (0 = auto/10)"
         default: "0"
@@ -51,7 +47,6 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       current_store: ${{ steps.resolve_chain.outputs.current_store }}
       next_store: ${{ steps.resolve_chain.outputs.next_store }}
-      remaining_queue: ${{ steps.resolve_chain.outputs.remaining_queue }}
       site_name: ${{ steps.resolve_store.outputs.site_name }}
       base_url: ${{ steps.resolve_store.outputs.base_url }}
       sitemap_url: ${{ steps.resolve_store.outputs.sitemap_url }}
@@ -60,38 +55,37 @@ jobs:
         id: resolve_chain
         run: |
           RAW_STORE="${{ github.event.inputs.store }}"
-          CHAIN_QUEUE="${{ github.event.inputs.chain_queue }}"
+          SEQUENCE=("bedroom-furniture-discounts" "discount-living-rooms" "dining-rooms-outlet" "tv-stands-outlet")
 
-          echo "Input store:       $RAW_STORE"
-          echo "Input chain_queue: $CHAIN_QUEUE"
+          echo "Input store: $RAW_STORE"
 
-          # Canonical mapping: BFD -> DLR -> DRO -> TVS
           if [ "$RAW_STORE" = "all" ]; then
-            CURRENT_STORE="bedroom-furniture-discounts"
-            NEXT_STORE="discount-living-rooms"
-            REMAINING_QUEUE="dining-rooms-outlet,tv-stands-outlet"
-          elif [ -n "$CHAIN_QUEUE" ]; then
-            CURRENT_STORE="$RAW_STORE"
-            NEXT_STORE=$(echo "$CHAIN_QUEUE" | cut -d',' -f1 | tr -d ' ')
-            if echo "$CHAIN_QUEUE" | grep -q ","; then
-              REMAINING_QUEUE=$(echo "$CHAIN_QUEUE" | cut -d',' -f2- | tr -d ' ')
-            else
-              REMAINING_QUEUE=""
-            fi
+            CURRENT_STORE="${SEQUENCE[0]}"
+            NEXT_STORE="chain:${SEQUENCE[1]}"
+          elif [[ "$RAW_STORE" == chain:* ]]; then
+            TARGET_NAME="${RAW_STORE#chain:}"
+            CURRENT_STORE="$TARGET_NAME"
+            NEXT_STORE=""
+            for ((i=0; i<${#SEQUENCE[@]}; i++)); do
+              if [ "${SEQUENCE[$i]}" = "$TARGET_NAME" ]; then
+                NEXT_IDX=$((i + 1))
+                if [ $NEXT_IDX -lt ${#SEQUENCE[@]} ]; then
+                  NEXT_STORE="chain:${SEQUENCE[$NEXT_IDX]}"
+                fi
+                break
+              fi
+            done
           else
             CURRENT_STORE="$RAW_STORE"
             NEXT_STORE=""
-            REMAINING_QUEUE=""
           fi
 
           echo "current_store=$CURRENT_STORE" >> $GITHUB_OUTPUT
           echo "next_store=$NEXT_STORE" >> $GITHUB_OUTPUT
-          echo "remaining_queue=$REMAINING_QUEUE" >> $GITHUB_OUTPUT
 
           echo "========================================="
           echo "Current Store to Scrape: $CURRENT_STORE"
           echo "Next Store in Chain:     $NEXT_STORE"
-          echo "Remaining in Queue:      $REMAINING_QUEUE"
           echo "========================================="
 
       - name: Resolve Store URLs & Configuration
@@ -405,19 +399,16 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GH_PAT || secrets.GITHUB_TOKEN }}
         run: |
           NEXT_STORE="${{ needs.plan.outputs.next_store }}"
-          REMAINING_QUEUE="${{ needs.plan.outputs.remaining_queue }}"
 
           echo "========================================="
           echo "Chaining to Next Store in Sequence"
-          echo "Next Store:      $NEXT_STORE"
-          echo "Remaining Queue: $REMAINING_QUEUE"
+          echo "Next Store: $NEXT_STORE"
           echo "========================================="
 
           gh workflow run drl-scrapper-fast.yml \
             --repo "${{ github.repository }}" \
             --ref "${{ github.ref_name }}" \
             --field store="$NEXT_STORE" \
-            --field chain_queue="$REMAINING_QUEUE" \
             --field total_sitemaps="${{ github.event.inputs.total_sitemaps }}" \
             --field sitemaps_per_job="${{ github.event.inputs.sitemaps_per_job }}" \
             --field specific_offsets="${{ github.event.inputs.specific_offsets }}" \
