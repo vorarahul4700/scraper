@@ -144,7 +144,7 @@ jobs:
       - name: Install Python dependencies for discovery
         run: |
           python -m pip install --upgrade pip
-          pip install cloudscraper curl-cffi requests beautifulsoup4 lxml
+          pip install cloudscraper requests beautifulsoup4 lxml
 
       - name: Discover sitemap structure via Cloudflare Solver
         id: discovery
@@ -159,7 +159,6 @@ jobs:
           import random
           import xml.etree.ElementTree as ET
           import cloudscraper
-          from curl_cffi import requests as cc_requests
 
           def log(msg):
               sys.stderr.write(f"[{time.strftime('%H:%M:%S')}] [Discovery] {msg}\n")
@@ -186,9 +185,13 @@ jobs:
           )
           headers = {
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
               "Accept-Language": "en-US,en;q=0.9",
+              "DNT": "1",
+              "Connection": "keep-alive",
+              "Referer": base_url + "/",
           }
+          scraper.headers.update(headers)
 
           found_count = 0
 
@@ -198,18 +201,11 @@ jobs:
                   content = None
                   status = 0
                   try:
-                      if attempt % 2 == 1:
-                          log(f"  [Attempt {attempt}/5] Using Cloudscraper...")
-                          resp = scraper.get(target_url, timeout=30)
-                          status = resp.status_code
-                          if status == 200:
-                              content = resp.text
-                      else:
-                          log(f"  [Attempt {attempt}/5] Using curl_cffi (chrome120)...")
-                          resp = cc_requests.get(target_url, headers=headers, timeout=30, impersonate="chrome120")
-                          status = resp.status_code
-                          if status == 200:
-                              content = resp.text
+                      log(f"  [Attempt {attempt}/5] Fetching with cloudscraper...")
+                      resp = scraper.get(target_url, timeout=30)
+                      status = resp.status_code
+                      if status == 200:
+                          content = resp.text
                   except Exception as e:
                       log(f"  [Attempt {attempt}/5] Exception: {e}")
 
@@ -236,7 +232,7 @@ jobs:
                   break
 
           if found_count == 0:
-              log("Could not auto-detect sitemap using Cloudflare solver after 5 retries. Defaulting to 20.")
+              log("Could not auto-detect sitemap using cloudscraper after 5 retries. Defaulting to 20.")
               found_count = 20
 
           github_output = os.getenv("GITHUB_OUTPUT")
