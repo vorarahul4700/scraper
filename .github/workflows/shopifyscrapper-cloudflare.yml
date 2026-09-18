@@ -283,6 +283,14 @@ jobs:
             
             JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))
             
+            # GitHub Actions enforces a hard limit of 256 matrix jobs per workflow
+            if [ "$JOBS" -gt 250 ]; then
+              echo "WARNING: Job count $JOBS exceeds GitHub Actions matrix limit of 256! Auto-adjusting sitemaps_per_job..."
+              PER_JOB=$(( (TOTAL + 249) / 250 ))
+              JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))
+              echo "Auto-adjusted to $PER_JOB sitemaps per job ($JOBS total matrix jobs)"
+            fi
+            
             for ((i=0;i<JOBS;i++)); do
               OFFSET=$(( i * PER_JOB ))
               MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$BASE_URL\",\"sitemap\":\"$SITEMAP_URL\",\"request_delay\":\"$REQ_DELAY\"},"
