@@ -91,8 +91,12 @@ MAX_URLS_PER_SITEMAP = int(os.getenv("MAX_URLS_PER_SITEMAP", "0"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "3"))
 REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY_BASE", os.getenv("REQUEST_DELAY", "0.3")))
 
-OUTPUT_CSV = f"products_chunk_{SITEMAP_OFFSET}.csv"
-SCRAPED_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")  # Fixed deprecated utcnow()
+# Output directory structure: output/<store>/products_chunk_<offset>.csv
+store_folder = TARGET_STORE if TARGET_STORE else "general"
+OUTPUT_DIR = os.getenv("OUTPUT_DIR", os.path.join("output", store_folder))
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+OUTPUT_CSV = os.path.join(OUTPUT_DIR, f"products_chunk_{SITEMAP_OFFSET}.csv")
+SCRAPED_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 # ================= LOGGER =================
 

@@ -36,6 +36,11 @@ on:
       request_delay:
         description: "Base delay between requests in seconds"
         default: "0.3"
+      is_chained:
+        description: "[Internal] Flag to continue automated store chain"
+        required: false
+        default: "false"
+        type: string
 
 permissions:
   contents: read
@@ -59,14 +64,15 @@ jobs:
         id: resolve_chain
         run: |
           RAW_STORE="${{ github.event.inputs.store }}"
+          IS_CHAINED="${{ github.event.inputs.is_chained }}"
           SEQUENCE=("afa-stores" "english-elm" "grayson-living" "france-and-son" "grayson-luxury")
 
-          echo "Input store: $RAW_STORE"
+          echo "Input store: $RAW_STORE (is_chained: $IS_CHAINED)"
 
           if [ "$RAW_STORE" = "all" ]; then
             CURRENT_STORE="${SEQUENCE[0]}"
             NEXT_STORE="${SEQUENCE[1]}"
-          else
+          elif [ "$IS_CHAINED" = "true" ]; then
             CURRENT_STORE="$RAW_STORE"
             NEXT_STORE=""
             for ((i=0; i<${#SEQUENCE[@]}; i++)); do
@@ -78,6 +84,10 @@ jobs:
                 break
               fi
             done
+          else
+            # User specifically selected ONE store: scrape ONLY this store, DO NOT chain!
+            CURRENT_STORE="$RAW_STORE"
+            NEXT_STORE=""
           fi
 
           echo "current_store=$CURRENT_STORE" >> $GITHUB_OUTPUT
@@ -85,7 +95,7 @@ jobs:
 
           echo "========================================="
           echo "Current Store to Scrape: $CURRENT_STORE"
-          echo "Next Store in Chain:     $NEXT_STORE"
+          echo "Next Store in Chain:     ${NEXT_STORE:-'None (Single store / Chain Complete)'}"
           echo "========================================="
 
       - name: Resolve Store URLs & Configuration
@@ -343,7 +353,9 @@ jobs:
         if: always()
         with:
           name: chunk_${{ matrix.offset }}
-          path: products_chunk_*.csv
+          path: |
+            products_chunk_*.csv
+            output/**/*.csv
           if-no-files-found: warn
           retention-days: 1
 
@@ -503,6 +515,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --ref "${{ github.ref_name }}" \
             --field store="$NEXT_STORE" \
+            --field is_chained="true" \
             --field total_sitemaps="${{ github.event.inputs.total_sitemaps }}" \
             --field sitemaps_per_job="${{ github.event.inputs.sitemaps_per_job }}" \
             --field specific_offsets="${{ github.event.inputs.specific_offsets }}" \
