@@ -269,9 +269,32 @@ jobs:
 
             JOBS=$(( (TOTAL + PER_JOB - 1) / PER_JOB ))
 
+            # Keep matrix job count strictly below 250
+            MAX_CAP=249
+            if [ "$JOBS" -gt "$MAX_CAP" ]; then
+              echo "WARNING: Job count ($JOBS) exceeds safety cap ($MAX_CAP)! Calculating minimum sitemaps per job..."
+              K=2
+              while true; do
+                CALC_JOBS=$(( (TOTAL + K - 1) / K ))
+                if [ "$CALC_JOBS" -le "$MAX_CAP" ]; then
+                  PER_JOB=$K
+                  JOBS=$CALC_JOBS
+                  break
+                fi
+                K=$((K + 1))
+              done
+              echo "Auto-adjusted to $PER_JOB sitemaps per job -> Total jobs: $JOBS (last job handles remaining sitemaps)"
+            fi
+
             for ((i=0;i<JOBS;i++)); do
               OFFSET=$(( i * PER_JOB ))
-              MATRIX+="{\"offset\":$OFFSET,\"limit\":$PER_JOB,\"url\":\"$BASE_URL\",\"sitemap\":\"$SITEMAP_URL\"},"
+              REMAINING=$(( TOTAL - OFFSET ))
+              if [ "$REMAINING" -lt "$PER_JOB" ]; then
+                JOB_LIMIT=$REMAINING
+              else
+                JOB_LIMIT=$PER_JOB
+              fi
+              MATRIX+="{\"offset\":$OFFSET,\"limit\":$JOB_LIMIT,\"url\":\"$BASE_URL\",\"sitemap\":\"$SITEMAP_URL\"},"
             done
           fi
           MATRIX="${MATRIX%,}]"
