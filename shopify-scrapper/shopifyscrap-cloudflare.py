@@ -87,8 +87,8 @@ SITEMAP_OFFSET = int(os.getenv("SITEMAP_OFFSET", "0"))
 MAX_SITEMAPS = int(os.getenv("MAX_SITEMAPS", "0"))
 MAX_URLS_PER_SITEMAP = int(os.getenv("MAX_URLS_PER_SITEMAP", "0"))
 
-# Reduced workers to avoid detection (cap at 4 max for Shopify API)
-MAX_WORKERS = min(int(os.getenv("MAX_WORKERS", "3")), 4)  # Max 4 workers
+# Worker concurrency setting (cap removed as requested)
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "3"))
 REQUEST_DELAY_BASE = float(os.getenv("REQUEST_DELAY_BASE", os.getenv("REQUEST_DELAY", "0.3")))
 
 OUTPUT_CSV = f"products_chunk_{SITEMAP_OFFSET}.csv"
@@ -114,11 +114,15 @@ class RequestManager:
             delay=10  # Cloudflare challenge delay
         )
         
-        # Headers for HTML/XML pages (sitemap, robots.txt)
+        # Headers for HTML/XML pages (sitemap, robots.txt) matching real browser signature
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "Accept-Language": "en-US,en;q=0.9",
+            "User-Agent": os.getenv("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.8",
+            "sec-ch-ua": '"Brave";v="153", "Not_A Brand";v="8", "Chromium";v="153"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-gpc": "1",
             "DNT": "1",
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
@@ -126,22 +130,38 @@ class RequestManager:
             "Sec-Fetch-Mode": "navigate",
             "Sec-Fetch-Site": "none",
             "Sec-Fetch-User": "?1",
-            "Cache-Control": "max-age=0",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
             "Referer": CURR_URL + "/",
         }
         # Headers for JSON API requests (product .json endpoint)
         self.json_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": os.getenv("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"),
             "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Language": "en-US,en;q=0.8",
+            "sec-ch-ua": '"Brave";v="153", "Not_A Brand";v="8", "Chromium";v="153"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-gpc": "1",
             "DNT": "1",
             "Connection": "keep-alive",
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
             "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
             "Referer": CURR_URL + "/",
         }
+        
+        # Support passing custom browser cookies via SHOPIFY_COOKIE or COOKIE env var
+        cookie_str = os.getenv("SHOPIFY_COOKIE", os.getenv("COOKIE", "")).strip()
+        if cookie_str:
+            self.headers["Cookie"] = cookie_str
+            self.json_headers["Cookie"] = cookie_str
+            for item in cookie_str.split(";"):
+                if "=" in item:
+                    k, v = item.strip().split("=", 1)
+                    self.scraper.cookies.set(k.strip(), v.strip())
         
         self.scraper.headers.update(self.headers)
         self.retry_delays = [1, 2, 4, 8, 16]  # Exponential backoff
@@ -194,7 +214,7 @@ class RequestManager:
                 url, 
                 headers=self.headers,
                 timeout=30,
-                impersonate="chrome110"
+                impersonate="chrome120"
             )
             if response.status_code == 200:
                 return response.text, response.status_code
@@ -499,7 +519,7 @@ def main():
             break
         log(f"Failed to load: {candidate}")
     
-    if not index:
+    if index is None:
         log("ERROR: Could not load sitemap index from any known location. Site may be blocking requests.")
         log("Exiting without failure to allow merge job to run.")
         sys.exit(0)
@@ -604,7 +624,7 @@ def main():
                 log(f"[{sitemap_idx+1}/{len(sitemaps)}] Loading sitemap: {sitemap_url}")
                 
                 xml = load_xml(sitemap_url, crawl_delay)
-                if not xml:
+                if xml is None:
                     log(f"  Failed to load sitemap, skipping")
                     continue
                 
