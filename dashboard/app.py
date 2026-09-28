@@ -29,7 +29,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from ai_score import AIScoreService
+try:
+    from ai_score import AIScoreService
+except ImportError:
+    class AIScoreService:
+        def __init__(self, *args, **kwargs):
+            pass
 from validate import Validate, DEFAULT_SCORE_CONFIG, DEFAULT_FILTER_CONFIG, DEFAULT_EXCLUDE_CATEGORY
 
 # ---------------------------------------------------------------------------
@@ -850,5 +855,17 @@ def api_ai_reload():
 
 
 if __name__ == "__main__":
-    print("🚀 Scraper Dashboard running at http://localhost:5050")
-    app.run(host="0.0.0.0", port=5050, debug=False)
+    import socket
+    port = int(os.environ.get("PORT", 5050))
+    
+    def is_port_in_use(p):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            return s.connect_ex(('127.0.0.1', p)) == 0
+
+    if is_port_in_use(port) and "PORT" not in os.environ:
+        port = 5051
+        while is_port_in_use(port):
+            port += 1
+
+    print(f"🚀 Scraper Dashboard running at http://localhost:{port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
