@@ -1,4 +1,4 @@
-name: Cymax - Sitemap Scraper (FlareSolverr)
+name: Cymax - Product Scraper
 
 concurrency:
   group: cymax-scraper-${{ github.event.inputs.url }}

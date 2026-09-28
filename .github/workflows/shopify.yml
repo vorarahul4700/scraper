@@ -1,4 +1,4 @@
-name: Shopify - Cloudflare Resistant Sitemap Scraper
+name: Shopify - Product Scraper
 
 on:
   workflow_dispatch:

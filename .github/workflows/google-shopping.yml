@@ -1,4 +1,4 @@
-name: Google Shopping - Keyword Scraper
+name: Google Shopping - Product Scraper
 
 on:
   workflow_dispatch:
