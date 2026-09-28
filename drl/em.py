@@ -13,6 +13,8 @@ from typing import Optional, List, Dict
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from urllib.parse import urlparse
 
 import cloudscraper
 import requests
@@ -294,6 +296,7 @@ def main():
         ])
 
         seen = set()
+        all_product_urls: list = []  # track all sitemap URLs
         stats = {'sitemaps_processed': 0, 'urls_processed': 0, 'products_fetched': 0, 'errors': 0}
 
         for sitemap_url in sitemaps_to_process:
@@ -305,6 +308,7 @@ def main():
                 continue
 
             urls = [e.text.strip() for e in xml.findall(".//ns:url/ns:loc", ns) if e.text and '.html' in e.text]
+            all_product_urls.extend(urls)  # collect for URL tracking
             
             if MAX_URLS_PER_SITEMAP:
                 urls = urls[:MAX_URLS_PER_SITEMAP]
@@ -332,8 +336,21 @@ def main():
     log(f"Output file        : {OUTPUT_CSV}")
     log("=" * 70)
 
+
+# Save per-chunk URL list for artifact upload (merged in YML merge job)
+if __name__ == "__main__" and 'all_product_urls' in dir() and all_product_urls:
+    try:
+        _chunk_id = locals().get('CHUNK_ID') or locals().get('SITEMAP_OFFSET', '0')
+        _url_list_file = f"url_list_chunk_{_chunk_id}.txt"
+        with open(_url_list_file, "w", encoding="utf-8") as _uf:
+            _uf.write("\n".join(all_product_urls))
+        print(f"[URL-LIST] Saved {len(all_product_urls)} URLs to {_url_list_file}", flush=True)
+    except Exception as _exc:
+        print(f"[URL-LIST] Warning: {_exc}", flush=True)
+
 if __name__ == "__main__":
     if not CURR_URL:
         log("CURR_URL env var missing", "ERROR")
         sys.exit(1)
     main()
+    log(f"Note: URL tracking post-processing error: {exc}")

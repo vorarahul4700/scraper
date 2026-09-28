@@ -9,6 +9,8 @@ from typing import Optional
 from datetime import datetime
 from xml.etree import ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from urllib.parse import urlparse
 
 # ================= ENV =================
 
@@ -165,6 +167,7 @@ with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
     ])
 
     seen = set()
+    all_product_urls: list = []  # track all URLs fetched from sitemaps
 
     for sitemap_url in sitemaps:
         log(f"Loading sitemap: {sitemap_url}")
@@ -173,6 +176,7 @@ with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
             continue
 
         urls = [e.text for e in xml.findall(".//ns:url/ns:loc", ns)]
+        all_product_urls.extend([u for u in urls if u])
         if MAX_URLS_PER_SITEMAP:
             urls = urls[:MAX_URLS_PER_SITEMAP]
 
@@ -187,3 +191,13 @@ with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
         gc.collect()
 
 log(f"Completed: {OUTPUT_CSV}")
+
+# Save per-chunk URL list for artifact upload (merged in YML merge job)
+if all_product_urls:
+    try:
+        _url_list_file = f"url_list_chunk_{SITEMAP_OFFSET}.txt"
+        with open(_url_list_file, "w", encoding="utf-8") as _uf:
+            _uf.write("\n".join(all_product_urls))
+        log(f"[URL-LIST] Saved {len(all_product_urls)} URLs to {_url_list_file}")
+    except Exception as _exc:
+        log(f"[URL-LIST] Warning: {_exc}")
