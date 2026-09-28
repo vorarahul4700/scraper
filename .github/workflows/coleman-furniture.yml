@@ -1,4 +1,4 @@
-name: Coleman Brand Scraper (API/FTP/Sitemap) - File Support
+name: Coleman Furniture - Brand Scraper (API / FTP / Sitemap)
 
 on:
   workflow_dispatch:

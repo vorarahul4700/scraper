@@ -1,4 +1,4 @@
-name: Cymax V2 Scaled Scraper
+name: Cymax - V2 Streaming Scaled Scraper
 
 on:
   workflow_dispatch:

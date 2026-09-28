@@ -1,4 +1,4 @@
-name: LuxeDecor Scraper
+name: LuxeDecor - Product Scraper
 
 on:
   workflow_dispatch:

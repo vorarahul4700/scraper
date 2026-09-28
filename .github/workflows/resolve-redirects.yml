@@ -1,4 +1,4 @@
-name: Resolve Redirect URLs (MySQL Matrix)
+name: Redirect Resolver Utility - MySQL Matrix
 
 on:
   workflow_dispatch:

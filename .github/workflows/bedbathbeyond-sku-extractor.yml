@@ -1,4 +1,4 @@
-name: BBB SKU Extract from OVS Variants
+name: Bed Bath & Beyond - SKU Extractor from Overstock
 
 on:
   workflow_dispatch:

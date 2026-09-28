@@ -1,4 +1,4 @@
-name: Emma Mason Scraper (Cloudscraper - Fast)
+name: Emma Mason - Scraper (Cloudscraper Fast)
 
 on:
   workflow_dispatch:

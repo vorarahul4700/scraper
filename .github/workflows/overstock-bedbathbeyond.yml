@@ -1,4 +1,4 @@
-name: Parallel Sitemap Scraper OVS/BBB (Enhanced v1.3)
+name: Overstock / Bed Bath & Beyond - Parallel Sitemap Scraper
 
 on:
   workflow_dispatch:

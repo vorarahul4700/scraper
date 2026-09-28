@@ -1,4 +1,4 @@
-name: Cleanup GitHub Logs & Artifacts
+name: Cleanup Utility - GitHub Logs & Artifacts
 
 on:
   schedule:

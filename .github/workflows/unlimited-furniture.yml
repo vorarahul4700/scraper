@@ -1,4 +1,4 @@
-name: Parallel Sitemap Scraper - unlimitedfurniture
+name: Unlimited Furniture - Parallel Sitemap Scraper
 
 on:
   workflow_dispatch:

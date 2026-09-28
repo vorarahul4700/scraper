@@ -1,4 +1,4 @@
-name: Parallel Sitemap Scraper - Walmart
+name: Walmart - Parallel Sitemap Scraper
 
 on:
   workflow_dispatch:

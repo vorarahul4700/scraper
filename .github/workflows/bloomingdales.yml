@@ -1,4 +1,4 @@
-name: Parallel Sitemap Scraper - bloomingdales
+name: Bloomingdale's - Parallel Sitemap Scraper
 
 on:
   workflow_dispatch:

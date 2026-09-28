@@ -1,4 +1,4 @@
-name: Emma Mason Scraper with FlareSolverr
+name: Emma Mason - Scraper (FlareSolverr)
 
 on:
   workflow_dispatch:

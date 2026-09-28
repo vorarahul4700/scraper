@@ -1,4 +1,4 @@
-name: DRL/TVS/DRO/BFD Scraper
+name: Discount Living Rooms - Scraper (DRL / TVS / DRO / BFD)
 
 on:
   workflow_dispatch:

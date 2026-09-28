@@ -1,4 +1,4 @@
-name: Parallel Sitemap Scraper - bisonoffice
+name: BisonOffice - Parallel Sitemap Scraper
 
 on:
   workflow_dispatch:

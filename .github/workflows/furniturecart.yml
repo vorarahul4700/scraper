@@ -1,4 +1,4 @@
-name: FP FC Scraper with FlareSolverr (Chunked)
+name: Furniture Cart - Scraper (FP / FC FlareSolverr)
 
 on:
   workflow_dispatch:
