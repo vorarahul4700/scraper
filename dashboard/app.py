@@ -35,6 +35,27 @@ except ImportError:
     class AIScoreService:
         def __init__(self, *args, **kwargs):
             pass
+
+        def reload_data(self):
+            pass
+
+        def list_products(self):
+            return []
+
+        def list_products_page(self, query="", page=1, page_size=50):
+            return {"items": [], "total": 0, "page": page, "page_size": page_size}
+
+        def get_product_details(self, product_id, **kwargs):
+            return {"product_id": product_id, "matches": []}
+
+        def score_competitor(self, **kwargs):
+            return {"status": "ok"}
+
+        def score_all(self, **kwargs):
+            return []
+
+        def update_score(self, **kwargs):
+            return {"status": "ok"}
 from validate import Validate, DEFAULT_SCORE_CONFIG, DEFAULT_FILTER_CONFIG, DEFAULT_EXCLUDE_CATEGORY
 
 # ---------------------------------------------------------------------------
